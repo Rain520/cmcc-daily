@@ -285,6 +285,21 @@ class HistoryViewTests(unittest.TestCase):
         self.assertIn("for (const account of matches)", self.script)
         self.assertIn("$('#account-count').textContent = matches.length;".replace("'", '"'), self.script)
 
+    def test_bulk_run_controls_are_wired(self):
+        """账号卡片一键执行与页面顶部的一键执行全部。"""
+        self.assertIn('id="batch-run"', self.html)
+        self.assertIn("accounts-view", self.paths["batch-run"])
+        for element in ("batch-dialog", "batch-form", "batch-hint", "batch-error", "batch-submit"):
+            self.assertIn(f'id="{element}"', self.html)
+        self.assertIn("function runAllForAccount(", self.script)
+        self.assertIn("function batchCounts(", self.script)
+        self.assertIn("function syncBatchDialog(", self.script)
+        self.assertIn('api("/run-batch"', self.script)
+        self.assertIn("/accounts/${account.id}/run-all", self.script)
+        self.assertIn('button("一键执行"', self.script)
+        self.assertIn("has_fee_session_cookie", self.script)
+        self.assertIn(".heading-actions{", self.style)
+
     def test_run_dialog_only_blocks_the_same_task(self):
         """有任务在执行或排队时，手动执行仍可打开，只禁用同一任务并提示重复提交。"""
         for element in ("run-task", "run-dry-run", "run-hint", "run-submit"):

@@ -35,3 +35,8 @@ button.task-status{cursor:pointer}button.task-status:hover{filter:brightness(.95
 @media(prefers-reduced-motion:reduce){.account-health.running .status-dot{animation:none}}
 @media(max-width:760px){.account-status-filters{gap:7px}.status-filter{padding:7px 10px;font-size:11px}.account-health-line{gap:7px}.account-task-heading strong{font-size:13px}.task-timing{font-size:11px}.account-title h3{font-size:15px}.account-top>.badge{font-size:10px;white-space:nowrap}.account-card{padding:18px}.task-part{font-size:10px}}
 .run-hint{margin:12px 0 0;padding:10px 12px;border:1px solid #f0dcae;background:#fff8e6;color:#8a6512;border-radius:8px;font-size:11px;line-height:1.7}
+.heading-actions{display:flex;align-items:center;gap:10px;flex-wrap:wrap;justify-content:flex-end}
+.card-actions{flex-wrap:wrap}
+.batch-options{margin-bottom:14px}.batch-options .checkbox{margin:0 0 9px;font-size:12px}.batch-options .checkbox:last-child{margin-bottom:0}
+#batch-hint{margin:0}
+@media(max-width:760px){.heading-actions{gap:8px;justify-content:flex-start}.heading-actions .button{padding:9px 12px;font-size:11px}.batch-options .checkbox{font-size:11px}}

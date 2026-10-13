@@ -210,6 +210,14 @@ def normalize_account(body, old=None, timezone_name="Asia/Shanghai"):
     return account
 
 
+def runnable_tasks(account):
+    """一键执行时提交哪些任务：签到、拼图、评价有礼；话费查询需要先有话费会话。"""
+    tasks = ["sign", "wed", "rate"]
+    if account["config"].get("fee_session_cookie"):
+        tasks.append("fee")
+    return tasks
+
+
 def public_account(account):
     result = {**account, "config": dict(account["config"])}
     for field in SECRET_FIELDS:
@@ -519,6 +527,20 @@ class Store:
         with self.connect() as conn:
             return [row["account_id"] for row in conn.execute(
                 "SELECT DISTINCT account_id FROM runs WHERE status IN ('queued','running')")]
+
+    def latest_task_runs(self, statuses):
+        """每个账号每个任务最近一次正式执行的结果，用于批量重试失败的任务。
+
+        这里不看凭证更新时间，方便更新 App Token 后一次性重跑此前失败的任务。
+        """
+        marks = ",".join("?" * len(statuses))
+        with self.connect() as conn:
+            rows = conn.execute(f"""SELECT * FROM (
+                SELECT *, ROW_NUMBER() OVER (
+                    PARTITION BY account_id,task ORDER BY created_at DESC,rowid DESC) AS rank
+                FROM runs WHERE dry_run=0) WHERE rank=1 AND status IN ({marks})""",
+                tuple(statuses)).fetchall()
+        return [dict(row) for row in rows]
 
     def pending_tasks(self):
         """每个账号各自待执行/运行中的任务；界面据此只禁用对应那一项。"""

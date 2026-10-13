@@ -1,5 +1,19 @@
 # 发布容器镜像
 
+## 1.6.4
+
+已于 2026-10-14 通过本机 Docker Desktop 发布 Docker Hub 镜像 `rain5201/cmcc-daily:1.6.4` 与 `latest`：新增账号卡片「一键执行」（一次提交该账号下全部可执行、且未在执行或排队的任务）与页面标题「一键执行全部」（所有账号已开启计划的任务，或仅重试失败的任务）。批量提交与单个任务共用同一队列、按发起顺序串行执行，跳过的任务会在提示与执行记录中说明原因；话费查询需要先配置话费会话。支持 `linux/amd64`、`linux/arm64`。
+
+两标签摘要：`sha256:9b8ef649dc5757f8013effab0cfe86af03b3ed2622f0c1d634c543f6f8d31dd1`（AMD64 清单 `sha256:901644a7bbcc56e98cc496d8ba5dc1232e4ac6fdb7189cb1c3239f5c1fe08678`，ARM64 清单 `sha256:678bf2775ae2e1303e4dfb3a50741e0d784d2e3afb944f2d5f406ec6a3753cfc`）。发布后已用该镜像运行容器冒烟测试，并在本机审核预览中验证批量提交行为。
+
+多架构发布命令（需要能访问 Docker Hub 的代理时先设置 `HTTP_PROXY`/`HTTPS_PROXY`）：
+
+```powershell
+docker buildx build --platform linux/amd64,linux/arm64 --provenance=false --sbom=false `
+  -t rain5201/cmcc-daily:1.6.4 -t rain5201/cmcc-daily:latest --push .
+```
+
+
 ## 1.6.3
 
 已于 2026-10-14 通过本机 Docker Desktop 发布 Docker Hub 镜像 `rain5201/cmcc-daily:1.6.3` 与 `latest`：新增账号健康状态标记（正常、执行中、排队中、任务异常、凭证失效、尚未验证）与状态筛选、逐任务执行结果与日志入口、附属步骤结果（累计奖励／AI 豆／拓展活动），手动执行改为按任务排队（只拒绝同一任务重复提交，其他任务入队串行执行），已完成的任务再次执行会提示并默认「仅查询」，并新增结构化任务结果记录与凭证变更后重新验证。支持 `linux/amd64`、`linux/arm64`。
@@ -37,7 +51,7 @@ docker buildx build --platform linux/amd64,linux/arm64 --provenance=false --sbom
 | --- | --- |
 | `registry` | `ghcr.io` 或 `docker.io` |
 | `image_name` | 小写的 `账号或组织/cmcc-daily` |
-| `tag` | 版本标签，例如 `1.6.3` |
+| `tag` | 版本标签，例如 `1.6.4` |
 | `publish_latest` | 是否同时更新 `latest` 标签 |
 
 工作流先执行 Python 测试、Linux 镜像构建和容器冒烟测试，再发布 AMD64 与 ARM64 镜像。推送后还会拉取发布的摘要并再次验证 AMD64 容器。ARM64 镜像经过交叉构建，工作流不会运行 ARM64 容器测试。
@@ -72,7 +86,7 @@ python tools/package_feiniu.py 1.6.2      # 指定标签
 
 ```dotenv
 # 发布成功后使用；设置地址本身不会创建镜像。
-CMCC_IMAGE=rain5201/cmcc-daily:1.6.3
+CMCC_IMAGE=rain5201/cmcc-daily:1.6.4
 CMCC_WEB_PASSWORD='替换成自己的初始密码（至少6位）'
 CMCC_BIND_ADDRESS=0.0.0.0
 CMCC_WEB_PORT=18080

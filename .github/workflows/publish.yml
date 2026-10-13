@@ -17,9 +17,9 @@ on:
         default: rain5201/cmcc-daily
         type: string
       tag:
-        description: Version tag, e.g. 1.6.3
+        description: Version tag, e.g. 1.6.4
         required: true
-        default: "1.6.3"
+        default: "1.6.4"
         type: string
       publish_latest:
         description: Also update the latest tag

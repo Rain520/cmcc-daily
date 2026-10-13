@@ -264,7 +264,9 @@ function renderAccounts() {
     if (state.pendingAccounts.has(account.id)) {
       runButton.title = "该账号已有任务在执行或排队：同一任务不能重复提交，其他任务可以继续提交并自动排队。";
     }
-    actions.append(runButton, button("编辑", "button secondary", () => openAccount(account)), button("删除", "text-button delete-button", () => openDelete(account)));
+    const runAllButton = button("一键执行", "button secondary", () => runAllForAccount(account));
+    runAllButton.title = "提交该账号下所有未在执行或排队的任务";
+    actions.append(runButton, runAllButton, button("编辑", "button secondary", () => openAccount(account)), button("删除", "text-button delete-button", () => openDelete(account)));
     Array.from(actions.children).forEach((el, i) => { el.dataset.focusKey = `${account.id}-action-${i}`; });
     card.append(taskList, actions);
     grid.append(card);
@@ -450,6 +452,51 @@ function openAccount(account = null) {
   buildScheduleRows(account);
   $("#account-dialog").showModal();
 }
+function accountRunTasks(account) {
+  return taskOrder.filter(task => task !== "fee" || account.has_fee_session_cookie);
+}
+function batchToast(result) {
+  const queued = (result.queued || []).length;
+  const skipped = (result.skipped || []).length;
+  if (!queued) return skipped ? `没有可提交的任务，跳过 ${skipped} 个` : "没有可提交的任务";
+  return `已提交 ${queued} 个任务${skipped ? `，跳过 ${skipped} 个` : ""}，可在执行记录中查看`;
+}
+async function runAllForAccount(account) {
+  const list = accountRunTasks(account);
+  const pending = list.filter(task => state.pendingTasks.has(`${account.id}:${task}`));
+  const ready = list.filter(task => !state.pendingTasks.has(`${account.id}:${task}`));
+  if (!ready.length) { toast("该账号的任务都在执行或排队中", true); return; }
+  const names = ready.map(task => tasks[task]).join("、");
+  if (!window.confirm(`立即执行「${account.name}」的 ${ready.length} 个任务？\n${names}${pending.length ? `\n（${pending.length} 个正在执行或排队，将自动跳过）` : ""}`)) return;
+  try {
+    const result = await api(`/accounts/${account.id}/run-all`, "POST", {});
+    toast(batchToast(result));
+    await refresh();
+  } catch (error) { toast(error.message, true); }
+}
+function batchCounts(mode) {
+  let ready = 0, pending = 0;
+  for (const account of state.accounts) {
+    const candidates = mode === "enabled"
+      ? taskOrder.filter(task => accountSchedules(account)[task].enabled)
+      : ((account.summary && account.summary.tasks) || [])
+          .filter(entry => ["failed", "partial", "interrupted"].includes(entry.last_state))
+          .map(entry => entry.task);
+    for (const task of candidates) {
+      if (state.pendingTasks.has(`${account.id}:${task}`)) pending += 1; else ready += 1;
+    }
+  }
+  return { ready, pending };
+}
+function syncBatchDialog() {
+  const mode = $("#batch-form").elements.mode.value;
+  const { ready, pending } = batchCounts(mode);
+  const tail = pending ? `，另有 ${pending} 个正在执行或排队会跳过` : "";
+  $("#batch-hint").textContent = mode === "enabled"
+    ? `将提交 ${ready} 个已开启计划的任务${tail}。提交后按发起顺序串行执行。`
+    : `将重试 ${ready} 个最近一次执行失败的任务${tail}。适合更新 App Token、话费会话或修复网络后一次性补跑。`;
+  $("#batch-submit").disabled = ready === 0;
+}
 function runTaskEntry(account, task) {
   return ((account.summary && account.summary.tasks) || []).find(entry => entry.task === task) || {};
 }
@@ -554,6 +601,23 @@ $("#account-form").addEventListener("submit", event => {
   });
 });
 $("#run-task").addEventListener("change", syncRunDialog);
+$("#batch-run").addEventListener("click", () => {
+  $("#batch-form").reset();
+  $("#batch-error").textContent = "";
+  syncBatchDialog();
+  $("#batch-dialog").showModal();
+});
+$("#batch-form").addEventListener("change", syncBatchDialog);
+$("#batch-form").addEventListener("submit", event => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  submit(form, "#batch-error", async () => {
+    const result = await api("/run-batch", "POST", { mode: form.elements.mode.value });
+    $("#batch-dialog").close();
+    toast(batchToast(result));
+    await refresh();
+  });
+});
 $("#run-form").addEventListener("submit", event => {
   event.preventDefault();
   const form = event.currentTarget;

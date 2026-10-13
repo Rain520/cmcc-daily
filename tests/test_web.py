@@ -97,6 +97,50 @@ class WebTests(unittest.TestCase):
             self.assertEqual(self.store.run(run_id)["status"], "interrupted")
         self.assertEqual(self.client.delete(f"/api/accounts/{account['id']}", headers=self.headers).status_code, 200)
 
+    def test_account_run_all_queues_every_runnable_task(self):
+        account = self.add_account()
+        path = f"/api/accounts/{account['id']}/run-all"
+        with patch.object(self.manager, "healthy", return_value=True):
+            first = self.client.post(path, headers=self.headers, json={})
+            self.assertEqual(first.status_code, 202)
+            self.assertEqual(sorted(item["task"] for item in first.json["queued"]), ["rate", "sign", "wed"])
+            self.assertEqual(first.json["skipped"], [])
+            repeat = self.client.post(path, headers=self.headers, json={})
+            self.assertEqual(repeat.json["queued"], [])
+            self.assertEqual(len(repeat.json["skipped"]), 3)
+            self.assertTrue(all("排队" in item["reason"] for item in repeat.json["skipped"]), repeat.json["skipped"])
+            self.assertEqual(self.client.post("/api/accounts/missing/run-all", headers=self.headers, json={}).status_code, 404)
+        self.assertEqual(self.client.post(path, headers=self.headers, json={}).status_code, 503)
+
+    def test_account_run_all_includes_fee_only_with_cookie(self):
+        account = self.add_account()
+        self.assertEqual(self.client.put(f"/api/accounts/{account['id']}", headers=self.headers,
+                                        json={"config": {"fee_session_cookie": "example-cookie"}}).status_code, 200)
+        with patch.object(self.manager, "healthy", return_value=True):
+            response = self.client.post(f"/api/accounts/{account['id']}/run-all", headers=self.headers, json={})
+        self.assertEqual(sorted(item["task"] for item in response.json["queued"]), ["fee", "rate", "sign", "wed"])
+
+    def test_batch_run_enabled_then_failed(self):
+        account = self.add_account()
+        self.assertEqual(self.client.put(f"/api/accounts/{account['id']}", headers=self.headers, json={"schedules": {
+            "sign": {"enabled": True, "time": "10:00"},
+            "rate": {"enabled": True, "time": "09:00", "frequency": "weekly", "weekdays": [0]}}}).status_code, 200)
+        result = {"version": 1, "state": "failed", "reason": "business", "auth": "valid", "parts": {}}
+        with patch.object(self.manager, "healthy", return_value=True):
+            enabled = self.client.post("/api/run-batch", headers=self.headers, json={"mode": "enabled"})
+            self.assertEqual(enabled.status_code, 202)
+            self.assertEqual(sorted(item["task"] for item in enabled.json["queued"]), ["rate", "sign"])
+            pending = self.client.post("/api/run-batch", headers=self.headers, json={"mode": "enabled"})
+            self.assertEqual(pending.json["queued"], [])
+            self.assertEqual(sorted(item["task"] for item in pending.json["skipped"]), ["rate", "sign"])
+            for run in self.store.runs():
+                self.store.finish(run["id"], "failed", 1, "执行失败", result)
+            failed = self.client.post("/api/run-batch", headers=self.headers, json={"mode": "failed"})
+            self.assertEqual(failed.status_code, 202)
+            self.assertEqual(sorted(item["task"] for item in failed.json["queued"]), ["rate", "sign"])
+            self.assertEqual(self.client.post("/api/run-batch", headers=self.headers, json={"mode": "other"}).status_code, 400)
+        self.assertEqual(self.client.post("/api/run-batch", headers=self.headers, json={"mode": "enabled"}).status_code, 503)
+
     def test_other_tasks_queue_while_one_is_pending(self):
         account = self.add_account()
         path = f"/api/accounts/{account['id']}/run"

@@ -142,6 +142,20 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(self.store.account(account["id"])["schedules"]["rate"]["next_run"],
                          "2026-10-12T02:00:00+00:00", "入队成功后按计划推进到今天 10:00")
 
+    def test_latest_task_runs_ignores_queries_and_older_attempts(self):
+        first = self.store.enqueue(self.account["id"], "sign")
+        self.store.finish(first, "failed", 1, "执行失败")
+        second = self.store.enqueue(self.account["id"], "rate")
+        self.store.finish(second, "success", 0)
+        query = self.store.enqueue(self.account["id"], "sign", dry_run=True)
+        self.store.finish(query, "failed", 1, "仅查询失败")
+        failed = self.store.latest_task_runs(("failed",))
+        self.assertEqual([run["task"] for run in failed], ["sign"], "查询失败不算失败任务")
+        again = self.store.enqueue(self.account["id"], "sign")
+        self.store.finish(again, "success", 0)
+        self.assertEqual(self.store.latest_task_runs(("failed",)), [], "重试成功之后不再算失败")
+        self.assertEqual([run["task"] for run in self.store.latest_task_runs(("success",))], ["rate", "sign"])
+
     def test_legacy_row_is_read_as_daily_sign_schedule(self):
         with self.store.connect() as conn:
             conn.execute("""UPDATE accounts SET schedules=NULL, enabled=1, schedule_time='07:30',
