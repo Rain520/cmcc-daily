@@ -23,5 +23,5 @@
 
 部署后建议先查看容器健康状态，然后添加本人账号并选择「仅查询状态」，确认登录和活动状态正常后再开启计划。
 - 本地镜像 `cmcc-daily:1.1.0` 已构建并验证：52 项单元测试在 Windows 与容器内通过；容器冒烟测试覆盖登录、修改管理密码、旧密码失效、重启后密码与账号数据保持、Webhook 配置、非 root、只读文件系统与健康检查；另用独立临时容器确认未设置 `CMCC_WEB_PASSWORD` 时默认密码 `123456` 可登录。
-- 2026-10-13 源码托管到 GitHub 公开仓库 [Rain520/cmcc-daily](https://github.com/Rain520/cmcc-daily)（分支 `main`，44 个文件，提交信息使用 GitHub noreply 邮箱，`.env`、数据卷与 `dist` 未纳入版本库）；推送后 `Test and build #1` 在 GitHub Actions 上通过。
+- 2026-10-13 源码托管到 GitHub 仓库 [Rain520/cmcc-daily](https://github.com/Rain520/cmcc-daily)（分支 `main`，44 个文件，提交信息使用 GitHub noreply 邮箱，`.env`、数据卷与 `dist` 未纳入版本库）；推送后 `Test and build #1`、`#2` 均在 GitHub Actions 上通过；随后按要求把仓库可见性改为私有。
 - 2026-10-13 发布 `rain5201/cmcc-daily:1.1.1` 与 `latest`：多架构索引摘要 `sha256:ec954c71a822d83aaffb70b140230c9699b67848d2cf80f117879768a016e308`，匿名 token 校验两个标签均返回 `linux/amd64`、`linux/arm64`；拉取远端镜像后 AMD64 冒烟测试与 ARM64 模拟测试通过；本地实例已改为运行该发布镜像。
