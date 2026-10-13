@@ -139,6 +139,16 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(saved["next_run"], "2026-10-12T00:00:00+00:00")
         self.assertFalse(saved["schedules"]["rate"]["enabled"])
 
+    def test_legacy_weekly_puzzle_option_is_ignored(self):
+        """旧账号勾过「签到时一并执行周三拼图」，升级后由独立任务负责，不再重复执行。"""
+        with self.store.connect() as conn:
+            conn.execute("UPDATE accounts SET options=? WHERE id=?",
+                         (json.dumps({"claim": True, "tasks": False, "games": False, "wed": True}),
+                          self.account["id"]))
+        account = self.store.account(self.account["id"])
+        self.assertFalse(account["options"]["wed"])
+        self.assertNotIn("--wed", task_args("sign", "config.json", account["options"], False))
+
     def test_history_cleanup_removes_only_finished_old_logs(self):
         run_id = self.store.enqueue(self.account["id"], "sign")
         self.store.finish(run_id, "success", 0)
@@ -206,6 +216,14 @@ class ConfigTests(unittest.TestCase):
         self.assertTrue(account["enabled"], "有任意任务开启时账号视为自动运行")
         self.assertIsNone(normalize_account({**base, "schedules": {
             "rate": {"enabled": False}}})["next_run"])
+
+    def test_weekly_puzzle_is_not_part_of_the_sign_run(self):
+        account = normalize_account({**account_data(), "options": {"wed": True, "claim": False}})
+        self.assertFalse(account["options"]["wed"])
+        self.assertFalse(account["options"]["claim"])
+        args = task_args("sign", "config.json", account["options"], False)
+        self.assertNotIn("--wed", args)
+        self.assertIn("--no-claim", args)
 
     def test_timezone_and_midnight(self):
         now = datetime(2026, 10, 12, 15, 59, tzinfo=timezone.utc)

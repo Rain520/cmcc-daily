@@ -170,7 +170,7 @@ function renderAccounts() {
       : "未开启"));
     const tags = node("div", undefined, "card-tags");
     tags.append(node("span", "每日签到", "card-tag"));
-    for (const [key, text] of Object.entries({ claim: "累计奖励", tasks: "AI 豆", games: "拓展活动", wed: "周三拼图" })) {
+    for (const [key, text] of Object.entries({ claim: "累计奖励", tasks: "AI 豆", games: "拓展活动" })) {
       if (account.options[key]) tags.append(node("span", text, "card-tag"));
     }
     const actions = node("div", undefined, "card-actions");
@@ -237,7 +237,7 @@ function openAccount(account = null) {
     form.elements.name.value = account.name;
     for (const field of configFields) if (!secretFields.includes(field)) form.elements[field].value = account.config[field] || "";
     for (const field of secretFields) form.elements[field].placeholder = account[`has_${field}`] ? "已保存；留空保留，填写则更新" : "未设置";
-    for (const [key, value] of Object.entries(account.options)) form.elements[key].checked = value;
+    for (const [key, value] of Object.entries(account.options)) if (form.elements[key]) form.elements[key].checked = value;
   } else {
     form.elements.app_token.placeholder = "粘贴 appTokenLogin 请求体中的 token";
     for (const field of secretFields.filter(f => f !== "app_token")) form.elements[field].placeholder = "选填";
@@ -297,7 +297,7 @@ $("#account-form").addEventListener("submit", event => {
   const form = event.currentTarget;
   submit(form, "#account-error", async () => {
     const config = Object.fromEntries(configFields.map(field => [field, form.elements[field].value]));
-    const options = Object.fromEntries(["claim", "tasks", "games", "wed"].map(field => [field, form.elements[field].checked]));
+    const options = Object.fromEntries(["claim", "tasks", "games"].map(field => [field, form.elements[field].checked]));
     const clear = ["serverchan_sendkey", "bark_url", "webhook_url", "webhook_token", "fee_session_cookie"].filter(field => form.elements[`clear_${field}`].checked);
     await api(state.editing ? `/accounts/${state.editing.id}` : "/accounts", state.editing ? "PUT" : "POST", {
       name: form.elements.name.value, config, options, schedules: readSchedules(), clear_secrets: clear,

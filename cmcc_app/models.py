@@ -198,6 +198,8 @@ def normalize_account(body, old=None, timezone_name="Asia/Shanghai"):
     options = {**OPTION_DEFAULTS, **old.get("options", {}), **supplied_options}
     if any(not isinstance(v, bool) for v in options.values()):
         raise ValueError("任务选项必须为布尔值")
+    # 周三拼图已是独立任务，签到脚本不再顺带执行，避免同一天跑两次。
+    options["wed"] = False
     schedules = normalize_schedules(body, old, timezone_name)
     account = {"id": old.get("id", uuid.uuid4().hex), "name": name.strip(),
                "config": config, "options": options, "schedules": schedules}
@@ -264,6 +266,8 @@ class Store:
         # 合并默认值：升级前保存的账号可能缺少后加入的字段（如 webhook_url）。
         value["config"] = {**CONFIG_DEFAULTS, **json.loads(value["config"])}
         value["options"] = {**OPTION_DEFAULTS, **json.loads(value["options"])}
+        # 旧账号可能勾选过「签到时一并执行周三拼图」，读取时按独立任务处理。
+        value["options"]["wed"] = False
         value["schedules"] = decode_schedules(value.pop("schedules", None), raw)
         # enabled/schedule_time/next_run 是旧版字段，始终按任务计划重新计算。
         value.update(schedule_mirrors(value["schedules"]))
