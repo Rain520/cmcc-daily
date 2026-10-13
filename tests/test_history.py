@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+import cmcc_app
 from cmcc_app.models import normalize_account
 from cmcc_app.settings import Settings
 from cmcc_app.web import create_app
@@ -144,6 +145,36 @@ class HistoryApiTests(unittest.TestCase):
             response = self.client.post("/api/runs/delete", headers=self.headers, json=payload)
             self.assertEqual(response.status_code, 400, payload)
         self.assertIsNotNone(self.store.run(run_id))
+
+
+class HistoryViewTests(unittest.TestCase):
+    """执行记录是独立界面，不再跟在账号总览下面。"""
+
+    def setUp(self):
+        root = Path(cmcc_app.__file__).resolve().parent
+        self.html = (root / "templates" / "index.html").read_text(encoding="utf-8")
+        self.script = (root / "static" / "app.js").read_text(encoding="utf-8")
+
+    def test_views_are_separate_and_navigable(self):
+        self.assertIn('<div id="accounts-view"', self.html)
+        self.assertIn('<div id="history-view" hidden>', self.html)
+        self.assertLess(self.html.index('id="accounts-view"'), self.html.index('id="history-view"'))
+        for name in ("accounts", "history"):
+            self.assertIn(f'data-view="{name}"', self.html)
+            self.assertIn(f'id="{name}-view"', self.html)
+        self.assertIn('id="breadcrumb-view"', self.html)
+        # 执行记录自己的标题栏包含计数、摘要与刷新
+        heading = self.html[self.html.index('id="history-view"'):self.html.index('<section id="history"')]
+        for element in ("run-count", "history-summary", "refresh"):
+            self.assertIn(f'id="{element}"', heading, element)
+        self.assertIn("function showView", self.script)
+        self.assertIn('state.view === "history"', self.script)
+
+    def test_history_view_keeps_the_history_controls(self):
+        view = self.html[self.html.index('id="history-view"'):]
+        for element in ("filter-account", "filter-keyword", "select-page", "delete-selected",
+                        "page-size", "run-list", "empty-runs"):
+            self.assertIn(f'id="{element}"', view, element)
 
 
 if __name__ == "__main__":

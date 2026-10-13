@@ -63,6 +63,7 @@ function showApp(session) {
   $("#login-view").hidden = true;
   $("#app-view").hidden = false;
   $("#loading").hidden = true;
+  showView(window.location.hash.slice(1) || "accounts", false);
 }
 function dateText(value) {
   if (!value) return "—";
@@ -314,7 +315,7 @@ async function refresh(silent = false) {
   } finally {
     refreshing = false;
   }
-  await loadRuns(silent);
+  if (state.view === "history") await loadRuns(silent);
   if ($("#log-dialog").open && state.logId) await updateLog();
 }
 function syncAccountFilter(force = false) {
@@ -430,6 +431,7 @@ $("#run-form").addEventListener("submit", event => {
     });
     $("#run-dialog").close();
     toast("任务已加入队列");
+    showView("history");
     await refresh();
     await openLog(result.run_id);
   });
@@ -685,9 +687,22 @@ document.querySelectorAll("[data-close]").forEach(control => control.addEventLis
 $("#account-dialog").addEventListener("close", () => { $("#account-form").reset(); });
 $("#log-dialog").addEventListener("close", () => { state.logId = null; });
 $("#delete-run").addEventListener("click", () => deleteRuns([state.logId], "删除这条执行记录？日志文件会一并删除。"));
-document.querySelectorAll(".nav-link").forEach(link => link.addEventListener("click", () => {
-  document.querySelectorAll(".nav-link").forEach(item => item.classList.toggle("active", item === link));
-}));
+const viewTitles = { accounts: "账号总览", history: "执行记录" };
+function showView(name, updateHash = true) {
+  const view = viewTitles[name] ? name : "accounts";
+  state.view = view;
+  $("#accounts-view").hidden = view !== "accounts";
+  $("#history-view").hidden = view !== "history";
+  $("#breadcrumb-view").textContent = viewTitles[view];
+  document.querySelectorAll(".nav-link").forEach(link => link.classList.toggle("active", link.dataset.view === view));
+  if (updateHash && window.location.hash !== `#${view}`) window.history.replaceState(null, "", `#${view}`);
+  if (view === "history" && state.authenticated) loadRuns(true);
+  window.scrollTo({ top: 0, behavior: "smooth" });
+}
+document.querySelectorAll(".nav-link").forEach(link => {
+  link.addEventListener("click", event => { event.preventDefault(); showView(link.dataset.view); });
+});
+window.addEventListener("hashchange", () => showView(window.location.hash.slice(1), false));
 setInterval(() => { if (!document.hidden) refresh(true); }, 4000);
 (async () => {
   try { showApp(await api("/session")); await refresh(); }
