@@ -34,7 +34,7 @@ MAX_LOG_BYTES = 512 * 1024
 MAX_LOG_TOTAL_BYTES = 4 * 1024 * 1024
 MAX_CACHE_BYTES = 256 * 1024
 CACHE_NAME_LENGTH = 64
-HISTORY_STATUSES = ("success", "failed", "interrupted")
+HISTORY_STATUSES = ("success", "partial", "failed", "interrupted")
 
 
 def check_passphrase(value, field="备份密码"):
@@ -207,7 +207,10 @@ def _history_row(run, account_id, account_name):
         return None
     if run.get("status") not in HISTORY_STATUSES:
         return None
+    from .results import clean
+    result = clean(run.get("result"))
     return {
+        "result": json.dumps(result) if result else None,
         "id": run_id, "account_id": account_id,
         "account_name": _text(run.get("account_name"), 200) or account_name,
         "task": task, "dry_run": 1 if run.get("dry_run") else 0,
@@ -247,6 +250,14 @@ def apply_payload(store, auth, payload, mode="merge", restore_password=True,
         # 备份中的账号按原样校验；id 沿用备份，执行记录的关联关系因此保持不变。
         account = normalize_account(body, None, timezone_name)
         account["id"] = candidate
+        for field in ("status_reset_at", "fee_reset_at"):
+            raw = entry.get(field)
+            try:
+                stamp = datetime.fromisoformat(raw) if isinstance(raw, str) and raw else None
+            except ValueError:
+                stamp = None
+            if stamp and stamp.tzinfo:
+                account[field] = stamp.isoformat()
         reserved.add(account["id"])
         seen.add(phone)
         plan.append((old_id, account, True))

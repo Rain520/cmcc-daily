@@ -30,6 +30,8 @@
 退出码：0 = 查询成功；1 = 失败（便于 cron 判断）
 """
 
+from cmcc_app import results as task_result
+
 import argparse
 import base64
 import json
@@ -97,10 +99,14 @@ def query_fee(phone: str, session_cookie: str, provcode: str = "731") -> dict:
               params={"time": t16(), "channel": "11"}, headers=headers, timeout=15)
     body = r.json()
     if body.get("retCode") != "000000":
+        if body.get("retCode") == "500003":
+            task_result.auth(False, fee=True)
         raise RuntimeError(f"接口返回 {body.get('retCode')}: {body.get('retMsg')}"
                            + ("（会话失效，请重新抓 jsessionid-cmcc）"
                               if body.get("retCode") == "500003" else ""))
-    return aes_dec(body["data"]["outParam"])
+    value = aes_dec(body["data"]["outParam"])
+    task_result.auth(True, fee=True)
+    return value
 
 
 def run(config_path: str) -> int:
@@ -140,6 +146,7 @@ def main() -> int:
     try:
         return run(args.config)
     except Exception as e:
+        task_result.error(e)
         log.error("查询失败: %s", e)
         try:
             cfg = Config(args.config)

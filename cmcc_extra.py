@@ -32,6 +32,8 @@
   python3 cmcc_sign.py --games --dry-run   # 只报状态与余额，不做任何写操作
 """
 
+from cmcc_app import results as task_result
+
 import logging
 import random
 import re
@@ -126,6 +128,7 @@ def run_diy_tasks(s: requests.Session, referer: str, component: str, dry_run: bo
     resp = api_call(s, referer, "GET", f"/qwhdhub/diyTask/list/{component}")
     tasks = resp.get("data") or []
     if not tasks and resp.get("code") != "SUCCESS":
+        task_result.mark("failed", "business")
         return f"任务清单获取失败: {resp.get('code')} {resp.get('msg')}"
     todo = [t for t in tasks if t.get("taskStage") == "UNDO"]
     if dry_run or not todo:
@@ -140,9 +143,11 @@ def run_diy_tasks(s: requests.Session, referer: str, component: str, dry_run: bo
         # 复查清单：完成后任务可能直接移出列表，按"消失"也算成功
         chk = api_call(s, referer, "GET", f"/qwhdhub/diyTask/list/{component}")
         cur = next((x for x in (chk.get("data") or []) if x.get("taskId") == tid), None)
-        if cur is None or cur.get("taskStage") == "DONE":
+        if chk.get("code") == "SUCCESS" and (cur is None or cur.get("taskStage") == "DONE"):
             done += 1
         time.sleep(random.uniform(1, 2.5))
+    if done < len(todo):
+        task_result.mark("partial", "partial")
     return f"代币任务 {len(todo)} 个待办，完成 {done} 个"
 
 
@@ -157,6 +162,7 @@ def run_lottery(s: requests.Session, referer: str, cfg: dict, dry_run: bool) -> 
     comp = cfg["component"]
     rem = api_call(s, referer, "POST", f"/qwhdhub/diyLottery/period/remain/{comp}", {})
     if rem.get("code") != "SUCCESS":
+        task_result.mark("failed", "business")
         return f"抽奖[{cfg['label']}] 余额查询失败: {rem.get('code')} {rem.get('msg')}"
     d = rem.get("data") or {}
     wallet = d.get(cfg["wallet_key"]) or 0
@@ -186,6 +192,7 @@ def run_lottery(s: requests.Session, referer: str, cfg: dict, dry_run: bool) -> 
             if stop_on_miss:
                 break
         else:
+            task_result.mark("partial", "business")
             results.append(f"失败({r.get('code')} {r.get('msg')})")
             break
         time.sleep(random.uniform(1.2, 2.8))
@@ -259,13 +266,17 @@ def run_mark_tasks(s: requests.Session, referer: str, cfg, dry_run: bool) -> str
     """
     begun = time.monotonic()
     tl = api_call(s, referer, "POST", "/qwhdhub/api/mark/task/taskList", {})
+    if tl.get("code") != "SUCCESS":
+        task_result.mark("failed", "business")
+        raise RuntimeError("AI 豆任务清单查询失败")
     tasks = (tl.get("data") or {}).get("tasks") or []
     # 外部合作区任务由合作方服务端回调记账，客户端无法代做，整区跳过
     ext = [t for t in tasks if t.get("status") == 0
            and t.get("taskClasifiName") == "外部合作区"]
     todo = [t for t in tasks if t.get("status") == 0
             and t.get("taskClasifiName") != "外部合作区"]
-    if dry_run or not todo:
+    pending_awards = [t for t in tasks if t.get("status") == 1]
+    if dry_run or not (todo or pending_awards):
         return (f"AI豆任务 {len(tasks)} 个，待办 {len(todo)} 个"
                 f"（另有外部合作区 {len(ext)} 个不做）")
 
@@ -273,7 +284,7 @@ def run_mark_tasks(s: requests.Session, referer: str, cfg, dry_run: bool) -> str
     got = skipped = 0
 
     # 上次运行握手中断/未领取的遗留（status=1 已完成待领奖）先补领
-    for t in [x for x in tasks if x.get("status") == 1]:
+    for t in pending_awards:
         tid = str(t.get("taskId") or "")
         aw = api_call(s, referer, "POST", "/qwhdhub/api/mark/task/getTaskAward",
                       {"taskId": tid})
@@ -281,6 +292,8 @@ def run_mark_tasks(s: requests.Session, referer: str, cfg, dry_run: bool) -> str
             n = (aw.get("data") or {}).get("awardNum")
             log.info("[AI豆] 补领 %s +%s", t.get("taskName", tid), n)
             got += 1
+        else:
+            task_result.mark("partial", "business")
         time.sleep(random.uniform(0.2, 0.5))
 
     def finish(tid, ttype, hdr_referer=None):
@@ -331,12 +344,16 @@ def run_mark_tasks(s: requests.Session, referer: str, cfg, dry_run: bool) -> str
         if done or r.get("code") == "SUCCESS":
             aw = api_call(s, referer, "POST", "/qwhdhub/api/mark/task/getTaskAward",
                           {"taskId": tid})
+            if aw.get("code") != "SUCCESS":
+                task_result.mark("partial", "business")
             n = (aw.get("data") or {}).get("awardNum") if aw.get("code") == "SUCCESS" else "?"
             log.info("[AI豆] %s +%s", t.get("taskName", tid), n)
             got += 1
         else:
             skipped += 1
         time.sleep(random.uniform(0.2, 0.6))
+    if skipped:
+        task_result.mark("partial", "skipped")
     cost = time.monotonic() - begun
     return (f"AI豆任务 {len(todo)} 个待办，完成 {got} 个，跳过 {skipped} 个"
             f"（第三方 App/真实操作类），外部合作区 {len(ext)} 个未计入，耗时 {cost:.0f}s")
@@ -352,6 +369,9 @@ def run_games(cfg, dry_run: bool) -> list[str]:
         if act["sign"]:
             do_method, do_path, do_body, q_method, q_path = act["sign"]
             st = api_call(s, referer, q_method, q_path, {} if q_method == "POST" else None)
+            if st.get("code") != "SUCCESS":
+                task_result.mark("failed", "business")
+                raise RuntimeError("拓展活动状态查询失败")
             data = st.get("data") or {}
             if act["signed"](data):
                 lines.append(f"{act['name']}: 今日已打卡")
@@ -360,6 +380,8 @@ def run_games(cfg, dry_run: bool) -> list[str]:
             else:
                 r = api_call(s, referer, do_method, do_path, do_body)
                 ok = r.get("code") == "SUCCESS" or "已签" in (r.get("msg") or "")
+                if not ok:
+                    task_result.mark("partial", "business")
                 lines.append(f"{act['name']}: 打卡{'成功' if ok else '失败 ' + str(r.get('msg'))}")
 
         if act.get("task_component"):

@@ -285,6 +285,19 @@ class HistoryViewTests(unittest.TestCase):
         self.assertIn("for (const account of matches)", self.script)
         self.assertIn("$('#account-count').textContent = matches.length;".replace("'", '"'), self.script)
 
+    def test_run_dialog_only_blocks_the_same_task(self):
+        """有任务在执行或排队时，手动执行仍可打开，只禁用同一任务并提示重复提交。"""
+        for element in ("run-task", "run-dry-run", "run-hint", "run-submit"):
+            self.assertIn(f'id="{element}"', self.html)
+        self.assertIn("function syncRunDialog(", self.script)
+        self.assertIn("option.disabled = busy;", self.script)
+        self.assertIn("state.pendingTasks.has(", self.script)
+        self.assertIn("pending_tasks", self.script)
+        self.assertIn("已经执行成功，确定再次真实执行吗", self.script)
+        self.assertIn('$("#run-dry-run").checked = done;', self.script)
+        self.assertNotIn("runButton.disabled = pending;", self.script)
+        self.assertIn(".run-hint{", self.style)
+
     def test_mobile_navigation_replaces_the_hidden_sidebar(self):
         """窄屏隐藏侧栏后必须仍有导航，否则手机上无法切换界面。"""
         self.assertIn('<nav id="mobile-nav"', self.html)

@@ -8,6 +8,8 @@ import sys
 from pathlib import Path
 
 from .logging_utils import RedactingFormatter
+from . import results
+from .storage import atomic_json
 
 MODULES = {"sign": "cmcc_sign", "wed": "cmcc_wed", "rate": "cmcc_rate", "fee": "cmcc_fee"}
 
@@ -34,16 +36,23 @@ def main():
         raise KeyboardInterrupt
 
     signal.signal(signal.SIGTERM, stop)
+    results.start(task, json.loads(options_json), dry_run == "1" and task != "fee")
+    code = 1
     try:
         module = importlib.import_module(MODULES[task])
         sys.argv = [module.__file__, *task_args(task, config_path, json.loads(options_json), dry_run == "1")]
-        return module.main()
+        code = module.main()
+        return code
     except KeyboardInterrupt:
         logging.info("任务已停止")
-        return 130
-    except Exception:
+        code = 130
+        return code
+    except Exception as exc:
+        results.error(exc)
         logging.exception("任务执行异常")
         return 1
+    finally:
+        atomic_json(Path(config_path).with_suffix(".result.json"), results.finish(code))
 
 
 if __name__ == "__main__":

@@ -36,6 +36,8 @@
 退出码：0 = 评价/兑换成功或已评过；1 = 失败（便于 cron 判断）
 """
 
+from cmcc_app import results as task_result
+
 import argparse
 import logging
 import sys
@@ -107,8 +109,10 @@ def run(cfg: Config, dry_run: bool, exchange_id: str | None) -> int:
                 lines.append("满分评价成功，+10 评价币")
             else:
                 lines.append(f"评价失败: {r.get('code')} {r.get('msg')}")
+                task_result.mark("failed", "business")
                 failed = True
     else:
+        task_result.mark("success", "already")
         lines.append(f"本周已评过（上次 {st.get('score', '?')} 分），无需操作")
 
     # ② 评价币余额：account/query 的 balance 是真实余额
@@ -152,11 +156,13 @@ def run(cfg: Config, dry_run: bool, exchange_id: str | None) -> int:
                          if "话费" in str(p.get("name", ""))), None)
             if meta is None:
                 lines.append("兑换: 档位列表中未找到话费券，跳过（可 --exchange <prizeId> 指定）")
+                task_result.mark("failed", "business")
                 failed = True
         else:
             meta = prize_meta.get(exchange_id)
             if meta is None or exchange_id not in status_keys:
                 lines.append(f"兑换 {exchange_id}: 不在当前档位列表中，已取消")
+                task_result.mark("failed", "business")
                 failed = True
                 meta = None
         if meta:
@@ -174,6 +180,7 @@ def run(cfg: Config, dry_run: bool, exchange_id: str | None) -> int:
                     lines.append(f"兑换成功: {name}，券 48 小时内到账，请到 App「我的奖品」查看")
                 else:
                     lines.append(f"兑换失败: {r.get('code')} {r.get('msg')}")
+                    task_result.mark("failed", "business")
                     failed = True
 
     summary = "\n".join(lines)
@@ -206,6 +213,7 @@ def main() -> int:
     try:
         return run(cfg, dry_run=args.dry_run, exchange_id=args.exchange)
     except Exception as e:
+        task_result.error(e)
         log.exception("执行失败: %s", e)
         notify_task(cfg, "移动评价有礼异常", f"{e}")
         return 1

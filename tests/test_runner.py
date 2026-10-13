@@ -49,6 +49,20 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(result["exit_code"], 7)
         self.assertEqual(result["status"], "failed")
 
+    def test_structured_result_survives_worker_boundary(self):
+        result = self.execute_fake("""
+import json, os
+from pathlib import Path
+path = next((Path(os.environ['CMCC_DATA_DIR']) / 'runtime').glob('*.json'))
+path.with_suffix('.result.json').write_text(json.dumps({
+    'version': 1, 'state': 'partial', 'reason': 'partial', 'auth': 'valid',
+    'parts': {'main': {'state': 'success', 'reason': 'ok'},
+              'claim': {'state': 'failed', 'reason': 'network'}}}))
+""")
+        self.assertEqual(result["status"], "partial")
+        self.assertIn('"claim"', result["result"])
+        self.assertIn("部分", result["message"])
+
     def test_timeout_terminates_child(self):
         self.manager.settings = Settings(self.root, "test-password-only", task_timeout=0.1)
         start = time.monotonic()

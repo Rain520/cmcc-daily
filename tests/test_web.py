@@ -97,6 +97,20 @@ class WebTests(unittest.TestCase):
             self.assertEqual(self.store.run(run_id)["status"], "interrupted")
         self.assertEqual(self.client.delete(f"/api/accounts/{account['id']}", headers=self.headers).status_code, 200)
 
+    def test_other_tasks_queue_while_one_is_pending(self):
+        account = self.add_account()
+        path = f"/api/accounts/{account['id']}/run"
+        with patch.object(self.manager, "healthy", return_value=True):
+            self.assertEqual(self.client.post(path, headers=self.headers, json={"task": "sign"}).status_code, 202)
+            duplicate = self.client.post(path, headers=self.headers, json={"task": "sign"})
+            self.assertEqual(duplicate.status_code, 400)
+            self.assertIn("每日签到", duplicate.json["error"])
+            other = self.client.post(path, headers=self.headers, json={"task": "rate"})
+            self.assertEqual(other.status_code, 202)
+        payload = self.client.get("/api/accounts").json
+        self.assertEqual(payload["pending"], [account["id"]])
+        self.assertEqual(sorted(item["task"] for item in payload["pending_tasks"]), ["rate", "sign"])
+
     def test_fee_requires_its_own_cookie(self):
         account = self.add_account()
         with patch.object(self.manager, "healthy", return_value=True):

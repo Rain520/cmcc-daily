@@ -98,6 +98,10 @@ for path in (data / 'auth.json', data / 'app.lock', data / 'cache' / 'fixture.js
         assert "webhook_token" not in account["config"]
         assert account["has_webhook_url"] and account["has_webhook_token"]
         assert account["next_run"] is None
+        overview = request("/api/accounts")["accounts"][0]
+        assert overview["summary"]["state"] == "unknown", overview["summary"]
+        assert overview["summary"]["tasks"][0]["state"] == "unexecuted"
+
         # 每个任务的独立计划可保存与读取；关闭状态不会触发执行。
         assert account["schedules"]["sign"]["time"] == "10:00", account["schedules"]
         assert account["schedules"]["rate"]["frequency"] == "weekly"

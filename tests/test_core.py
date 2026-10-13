@@ -116,18 +116,31 @@ class StoreTests(unittest.TestCase):
         self.assertGreater(value, now)
         self.assertLessEqual(value - now, timedelta(days=7))
 
-    def test_due_task_waits_for_a_pending_run_instead_of_dropping(self):
+    def test_other_tasks_queue_behind_a_pending_task(self):
+        """同一账号的不同任务互不阻塞：签到在跑时，评价有礼照样入队等执行。"""
+        self.store.enqueue(self.account["id"], "sign")
+        queued = self.store.enqueue(self.account["id"], "rate")
+        self.assertEqual(self.store.run(queued)["status"], "queued")
+        with self.assertRaises(ValueError):
+            self.store.enqueue(self.account["id"], "sign")          # 同一任务不能重复提交
+        self.assertEqual(sorted(run["task"] for run in self.store.runs()), ["rate", "sign"])
+        # 队列按发起顺序串行执行
+        self.assertEqual(self.store.take_run()["task"], "sign")
+        self.assertEqual(self.store.take_run()["task"], "rate")
+        self.assertIsNone(self.store.take_run())
+        pending = self.store.pending_tasks()
+        self.assertEqual(sorted((item["task"], item["status"]) for item in pending),
+                         [("rate", "running"), ("sign", "running")])
+
+    def test_due_schedule_queues_behind_another_pending_task(self):
         now = datetime(2026, 10, 12, 1, 0, tzinfo=timezone.utc)
         account = self.schedule_account(
             rate={"enabled": True, "time": "10:00", "next_run": "2026-10-12T00:00:00+00:00"})
-        self.store.enqueue(account["id"], "sign")  # 同一账号已有任务在排队
-        self.store.schedule_due("Asia/Shanghai", now)
-        self.assertEqual([run["task"] for run in self.store.runs()], ["sign"])
-        self.assertEqual(self.store.account(account["id"])["schedules"]["rate"]["next_run"],
-                         "2026-10-12T00:00:00+00:00", "排队失败时不应推进时间")
-        self.store.finish(self.store.runs()[0]["id"], "success", 0)
+        self.store.enqueue(account["id"], "sign")  # 同一账号已有别的任务在排队
         self.store.schedule_due("Asia/Shanghai", now)
         self.assertEqual(sorted(run["task"] for run in self.store.runs()), ["rate", "sign"])
+        self.assertEqual(self.store.account(account["id"])["schedules"]["rate"]["next_run"],
+                         "2026-10-12T02:00:00+00:00", "入队成功后按计划推进到今天 10:00")
 
     def test_legacy_row_is_read_as_daily_sign_schedule(self):
         with self.store.connect() as conn:

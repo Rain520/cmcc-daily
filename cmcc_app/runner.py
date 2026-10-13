@@ -66,6 +66,9 @@ class Manager(threading.Thread):
         run_id = run["id"]
         config_path = self.data / "runtime" / f"{run_id}.json"
         log_path = self.data / "logs" / f"{run_id}.log"
+        result_path = config_path.with_suffix(".result.json")
+        result = None
+        finished_normally = False
         process = None
         exit_code, status, message = 1, "failed", ""
         try:
@@ -96,6 +99,7 @@ class Manager(threading.Thread):
                         break
                     self.stop_event.wait(0.5)
                 else:
+                    finished_normally = True
                     exit_code = process.returncode
                     status = "success" if exit_code == 0 else "failed"
                     message = "执行完成，请查看活动详情" if exit_code == 0 else "执行失败，请查看日志"
@@ -107,6 +111,17 @@ class Manager(threading.Thread):
                         process.kill()
                         process.wait(timeout=5)
                     exit_code = process.returncode
+                if finished_normally and result_path.exists() and result_path.stat().st_size < 16384:
+                    from .results import clean, REASONS
+                    try:
+                        result = clean(json.loads(result_path.read_text(encoding="utf-8")))
+                    except (ValueError, OSError):
+                        result = None
+                    if result and result["state"] not in ("success", "partial", "failed", "interrupted"):
+                        result = None
+                    if result and status == "success":
+                        status = result["state"]
+                        message = REASONS[result["reason"]]
                 output.write(f"\n[应用] {message}（退出码 {exit_code}）\n")
         except Exception as exc:
             # 不将可能包含请求凭证的异常正文写入服务日志。
@@ -116,7 +131,11 @@ class Manager(threading.Thread):
             if process is not None and process.poll() is None:
                 process.kill()
                 process.wait(timeout=5)
+            if not finished_normally:
+                reason = "stopped" if status == "interrupted" else "timeout" if "超时" in message else "business"
+                result = {"version": 1, "state": status, "reason": reason, "auth": "unknown", "parts": {}}
             config_path.unlink(missing_ok=True)
+            result_path.unlink(missing_ok=True)
             with self.cancel_lock:
                 self.cancelled.discard(run_id)
-                self.store.finish(run_id, status, exit_code, message)
+                self.store.finish(run_id, status, exit_code, message, result)

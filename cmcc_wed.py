@@ -37,6 +37,8 @@ dp3=8折 9片），依次解锁不可跳级；碎片由抽奖随机获得，每�
 退出码：0 = 正常；1 = 异常（便于 CI 判断）
 """
 
+from cmcc_app import results as task_result
+
 import argparse
 import logging
 import random
@@ -267,6 +269,7 @@ def finish_tasks(cfg: Config, s: requests.Session, referer: str,
                 lines.append(f"[任务] {title} 代做成功" + (f"，+{add} 次" if add else ""))
                 done = True
             except Exception as e:
+                task_result.mark("partial", "business")
                 lines.append(f"[任务] {title} 上报失败: {e}")
 
         if not done:
@@ -297,6 +300,7 @@ def receive_ready(s: requests.Session, referer: str, state: dict, lines: list[st
         try:
             resp = r.json()
         except ValueError:
+            task_result.mark("partial", "business")
             lines.append(f"[领取] {label} 领取失败: 响应异常")
             continue
         msg = resp.get("msg") or ""
@@ -309,6 +313,7 @@ def receive_ready(s: requests.Session, referer: str, state: dict, lines: list[st
         elif "已领取" in msg:
             lines.append(f"[领取] {label} 已领取过")
         else:
+            task_result.mark("partial", "business")
             lines.append(f"[领取] {label} 领取失败: {msg or resp.get('code')}")
         time.sleep(random.uniform(1, 2))
 
@@ -334,6 +339,7 @@ def draw_all(s: requests.Session, referer: str, lines: list[str], max_draws: int
                    headers=api_headers(referer), timeout=30)
         resp = r.json()
         if resp.get("code") != "0":
+            task_result.mark("partial", "business")
             lines.append(f"[抽奖] 停止: {resp.get('code')} {resp.get('msg')}")
             break
         prize = (resp.get("data") or {}).get("prize") or {}
@@ -506,6 +512,7 @@ def main() -> int:
         notify_task(cfg, title, summary)
         return 0
     except Exception as e:
+        task_result.error(e)
         log.exception("执行失败: %s", e)
         notify_task(cfg, "周三充值日异常", f"{e}")
         return 1

@@ -2,12 +2,14 @@
 const $ = (selector) => document.querySelector(selector);
 const state = { csrf: "", timezone: "Asia/Shanghai", accounts: [], runs: [], editing: null, runAccount: null, logId: null, deleting: null, authenticated: false,
   runsTotal: 0, runsPages: 1, runsPage: 1, runsPageSize: 20, runsLatest: null, runsCounts: {},
-  runsScanned: null, selected: new Set(), runsLoading: false, runsLoaded: false, pendingAccounts: new Set(),
-  accountQuery: "" };
-const labels = { queued: "等待执行", running: "正在执行", success: "执行完成", failed: "执行失败", interrupted: "已停止" };
+  runsScanned: null, selected: new Set(), runsLoading: false, runsLoaded: false, pendingAccounts: new Set(), pendingTasks: new Set(),
+  accountQuery: "", accountStatus: "" };
+const labels = { queued: "等待执行", running: "正在执行", success: "执行完成", partial: "部分成功", failed: "执行失败", interrupted: "已停止" };
 const tasks = { sign: "每日签到", wed: "周三拼图", rate: "评价有礼", fee: "话费查询" };
 const taskOrder = ["sign", "wed", "rate", "fee"];
 const weekdayLabels = ["一", "二", "三", "四", "五", "六", "日"];
+const runTaskLabels = { sign: "每日签到（使用账号中保存的选项）", wed: "周三充值日拼图",
+  rate: "评价有礼（提交 10 分评价，不兑换）", fee: "话费余额查询" };
 const defaultSchedule = { enabled: false, time: "08:23", frequency: "daily", weekdays: [] };
 const configFields = ["phone", "app_token", "province_code", "city_code", "serverchan_sendkey", "bark_url", "webhook_url", "webhook_token", "fee_session_cookie", "activity_id", "channel_id", "app_version_code", "carrier_operator"];
 const secretFields = ["app_token", "serverchan_sendkey", "bark_url", "webhook_url", "webhook_token", "fee_session_cookie"];
@@ -163,48 +165,113 @@ function accountMatches(account, query) {
   return Boolean(digits) && haystack.replace(/\*/g, "").includes(digits);
 }
 function visibleAccounts() {
-  return state.accounts.filter(account => accountMatches(account, state.accountQuery));
+  return state.accounts.filter(account => accountMatches(account, state.accountQuery)
+    && (!state.accountStatus || (account.summary?.state || "unknown") === state.accountStatus));
+}
+const healthLabels = {normal: "运行正常", running: "执行中", queued: "排队中", warning: "任务异常", invalid: "凭证失效", unknown: "尚未验证"};
+const taskLabels = {success: "已完成", partial: "部分成功", failed: "执行失败", interrupted: "已停止", running: "执行中", queued: "排队中", waiting: "等待执行", missed: "计划未执行", unexecuted: "未执行", unknown: "详情未记录", query: "仅查询", skipped: "已跳过"};
+const taskIcons = {success: "✓", partial: "!", failed: "!", interrupted: "—", running: "↻", queued: "◷", waiting: "◷", missed: "!", unexecuted: "○", unknown: "—", query: "⌕", skipped: "—"};
+function renderStatusFilters() {
+  const group = $("#account-status-filters");
+  for (const [key, label] of [["", "全部账号"], ...Object.entries(healthLabels)]) {
+    let chip = Array.from(group.children).find(el => el.dataset.status === key);
+    if (!chip) {
+      chip = button("", "status-filter", () => { state.accountStatus = key; renderAccounts(); });
+      chip.dataset.status = key;
+      group.append(chip);
+    }
+    const count = state.accounts.filter(a => accountMatches(a, state.accountQuery) && (!key || (a.summary?.state || "unknown") === key)).length;
+    chip.replaceChildren(node("span", label), node("span", count, "filter-count"));
+    chip.setAttribute("aria-pressed", String(state.accountStatus === key));
+    chip.className = `status-filter ${key} ${state.accountStatus === key ? "selected" : ""}`;
+  }
 }
 function renderAccounts() {
   const grid = $("#account-grid");
+  const focused = grid.contains(document.activeElement) ? document.activeElement.dataset.focusKey : null;
   grid.replaceChildren();
+  renderStatusFilters();
   const matches = visibleAccounts();
   const total = state.accounts.length;
-  const searching = Boolean(state.accountQuery.trim());
+  const searching = Boolean(state.accountQuery.trim() || state.accountStatus);
   $("#empty-accounts").hidden = total > 0;
   $("#no-match-accounts").hidden = !(searching && total > 0 && matches.length === 0);
   $("#account-search-note").textContent = searching ? `匹配 ${matches.length} / 共 ${total} 个账号` : "凭证仅保存在服务端";
-  $("#account-search-clear").hidden = !searching;
+  $("#account-search-clear").hidden = !state.accountQuery;
   $("#account-search").value = state.accountQuery;
   $("#stat-accounts").replaceChildren(document.createTextNode(state.accounts.length), node("small", "个"));
   $("#stat-enabled").replaceChildren(document.createTextNode(state.accounts.filter(a => a.enabled).length), node("small", "个"));
   $("#account-count").textContent = matches.length;
   for (const account of matches) {
     const card = node("article", undefined, "account-card");
+    const summary = account.summary || {state: "unknown", label: "尚未验证", tasks: []};
+    card.dataset.status = summary.state;
     const top = node("div", undefined, "account-top");
     const title = node("div", undefined, "account-title");
     title.append(node("h3", account.name), node("span", account.config.phone.replace(/^(\d{3})\d{4}/, "$1 **** "), "account-phone"));
     top.append(node("span", account.name.slice(0, 1), "avatar"), title, node("span", account.enabled ? "自动运行" : "手动运行", `badge ${account.enabled ? "enabled" : ""}`));
-    const schedule = node("div", undefined, "schedule-info");
+    const health = node("div", undefined, "account-health-line");
+    const indicator = node("span", undefined, `account-health ${summary.state}`);
+    const dot = node("span", undefined, "status-dot"); dot.setAttribute("aria-hidden", "true");
+    indicator.append(dot, document.createTextNode(summary.label));
+    health.append(indicator, node("span", summary.checked_at ? `最近检查 ${dateText(summary.checked_at)}` : "首次执行后更新状态", "checked-at"));
+    card.append(top, health);
+    if (summary.state === "invalid") card.append(node("p", summary.issue_detail || "请更新凭证后重试", "account-issue invalid"));
+    if (summary.issue && ["running", "queued"].includes(summary.state)) {
+      card.append(node("p", summary.issue === "invalid" ? "上次凭证失效 · 本次结果返回后更新" : "上次任务异常 · 本次结果返回后更新", "account-issue"));
+    }
     const schedules = accountSchedules(account);
-    const planned = taskOrder.filter(task => schedules[task].enabled);
-    schedule.append(node("span", "任务计划"), node("strong", planned.length
-      ? planned.map(task => `${tasks[task]} ${scheduleText(schedules[task]).replace("每天 ", "").replace("每周", "周")}`).join(" · ")
-      : "未开启"));
-    const tags = node("div", undefined, "card-tags");
-    tags.append(node("span", "每日签到", "card-tag"));
-    for (const [key, text] of Object.entries({ claim: "累计奖励", tasks: "AI 豆", games: "拓展活动" })) {
-      if (account.options[key]) tags.append(node("span", text, "card-tag"));
+    const taskList = node("div", undefined, "account-task-list");
+    for (const entry of summary.tasks) {
+      const schedule = schedules[entry.task];
+      const row = node("div", undefined, "account-task-row");
+      const line = node("div", undefined, "account-task-heading");
+      let label = taskLabels[entry.state] || entry.state;
+      if (entry.state === "success" && schedule.enabled) label = schedule.frequency === "daily" ? "今日已完成" : schedule.weekdays.length === 1 ? "本周已完成" : "本次已完成";
+      const text = `${taskIcons[entry.state] || "○"} ${label}`;
+      const badge = entry.run_id ? button(text, `task-status ${entry.state}`, () => openLog(entry.run_id)) : node("span", text, `task-status ${entry.state}`);
+      badge.title = entry.run_id ? `${entry.detail} · 点击查看${entry.current || isPending({status:entry.state}) ? "本次" : "上次"}日志` : entry.detail;
+      badge.setAttribute("aria-label", `${tasks[entry.task]}：${label}${entry.run_id ? "，查看日志" : ""}`);
+      badge.dataset.focusKey = `${account.id}-${entry.task}`;
+      line.append(node("strong", tasks[entry.task]), badge);
+      row.append(line, node("p", schedule.enabled ? `${scheduleText(schedule)}${schedule.next_run ? " · 下次 " + dateText(schedule.next_run) : ""}` : "未开启计划 · 可手动执行", "task-timing"));
+      if (["failed", "partial", "interrupted"].includes(entry.state)) {
+        row.append(node("p", entry.detail, `task-detail ${entry.state}`));
+      } else if (entry.last_at) {
+        row.append(node("p", `${entry.current && entry.state === "success" ? "完成于" : "上次执行"} ${dateText(entry.last_at)}${entry.current && entry.state === "success" ? "" : " · " + (taskLabels[entry.last_state] || "详情未记录")}${entry.detail === "详情未记录" ? " · 旧记录详情未记录" : ""}`, "task-last"));
+      }
+      if (entry.state === "missed") row.append(node("p", "计划时间已过，未找到本次执行记录", "task-detail partial"));
+      if (entry.state === "success" && entry.detail === "已完成，无需重复操作") row.append(node("p", entry.detail, "task-last"));
+      if (entry.query_id) {
+        const query = button(`最近仅查询 ${dateText(entry.query_at)} ↗`, "task-query", () => openLog(entry.query_id));
+        query.dataset.focusKey = `${account.id}-${entry.task}-query`;
+        row.append(query);
+      }
+      if (entry.parts.length) {
+        const parts = node("div", undefined, "task-parts");
+        for (const part of entry.parts) {
+          const name = {claim: "累计奖励", tasks: "AI 豆", games: "拓展活动"}[part.key];
+          const tag = node("span", `${taskIcons[part.state] || "○"} ${name} · ${taskLabels[part.state] || "未执行"}`, `task-part ${part.state}`);
+          tag.title = part.detail;
+          parts.append(tag);
+        }
+        row.append(parts);
+      }
+      taskList.append(row);
     }
     const actions = node("div", undefined, "card-actions");
-    const pending = state.pendingAccounts.has(account.id);
-    const runButton = button(pending ? "任务执行中…" : "手动执行  →", "button primary", () => openRun(account));
-    runButton.disabled = pending;
+    const runButton = button("手动执行  →", "button primary", () => openRun(account));
+    if (state.pendingAccounts.has(account.id)) {
+      runButton.title = "该账号已有任务在执行或排队：同一任务不能重复提交，其他任务可以继续提交并自动排队。";
+    }
     actions.append(runButton, button("编辑", "button secondary", () => openAccount(account)), button("删除", "text-button delete-button", () => openDelete(account)));
-    card.append(top, schedule, node("p", account.next_run ? `下次执行 ${dateText(account.next_run)}` : "可随时手动执行，或按任务开启计划", "next-time"), tags, actions);
+    Array.from(actions.children).forEach((el, i) => { el.dataset.focusKey = `${account.id}-action-${i}`; });
+    card.append(taskList, actions);
     grid.append(card);
   }
+  if (focused) Array.from(grid.querySelectorAll("[data-focus-key]")).find(el => el.dataset.focusKey === focused)?.focus({preventScroll: true});
 }
+
 function renderRuns() {
   const list = $("#run-list");
   list.replaceChildren();
@@ -264,7 +331,7 @@ function renderPager() {
 function renderRunSummary(payload) {
   const counts = state.runsCounts || {};
   const parts = [`共 ${state.runsTotal} 条`];
-  for (const [status, label] of [["success", "完成"], ["failed", "失败"], ["interrupted", "已停止"], ["running", "运行中"], ["queued", "排队中"]]) {
+  for (const [status, label] of [["success", "完成"], ["partial", "部分成功"], ["failed", "失败"], ["interrupted", "已停止"], ["running", "运行中"], ["queued", "排队中"]]) {
     if (counts[status]) parts.push(`${label} ${counts[status]}`);
   }
   if (payload && payload.keyword) {
@@ -325,9 +392,10 @@ async function refresh(silent = false) {
     const accounts = await api("/accounts");
     if (!state.authenticated) return;
     state.accounts = accounts.accounts;
-    state.pendingAccounts = new Set(accounts.pending || []);
-    $("#health").textContent = accounts.healthy ? "服务运行中" : "调度器离线";
-    $("#health").className = accounts.healthy ? "health" : "health offline";
+    state.pendingTasks = new Set((accounts.pending_tasks || []).map(item => `${item.account_id}:${item.task}`));
+    state.pendingAccounts = new Set((accounts.pending_tasks || []).map(item => item.account_id));
+    $("#health").textContent = accounts.preview ? "审核预览" : accounts.healthy ? "服务运行中" : "调度器离线";
+    $("#health").className = accounts.preview || accounts.healthy ? "health" : "health offline";
     syncAccountFilter();
     renderAccounts();
   } catch (error) {
@@ -382,11 +450,49 @@ function openAccount(account = null) {
   buildScheduleRows(account);
   $("#account-dialog").showModal();
 }
+function runTaskEntry(account, task) {
+  return ((account.summary && account.summary.tasks) || []).find(entry => entry.task === task) || {};
+}
+function buildRunTasks(account) {
+  const select = $("#run-task");
+  select.replaceChildren();
+  for (const task of taskOrder) {
+    const busy = state.pendingTasks.has(`${account.id}:${task}`);
+    const label = runTaskLabels[task] || tasks[task];
+    const option = node("option", busy ? `${label}（已在队列中，不能重复提交）` : label);
+    option.value = task;
+    option.disabled = busy;
+    select.append(option);
+  }
+  const available = Array.from(select.options).find(option => !option.disabled);
+  if (available) select.value = available.value;
+}
+function syncRunDialog() {
+  const account = state.runAccount;
+  if (!account) return;
+  const task = $("#run-task").value;
+  const entry = runTaskEntry(account, task);
+  const busy = state.pendingTasks.has(`${account.id}:${task}`);
+  const done = !busy && task !== "fee" && entry.state === "success";
+  const hint = $("#run-hint");
+  if (busy) {
+    hint.textContent = `${tasks[task]}正在${entry.state === "running" ? "执行" : "排队"}，同一任务不能重复提交；可以改选其他任务，提交后会自动排队。`;
+  } else if (done) {
+    hint.textContent = `${tasks[task]}最近一次已执行成功${entry.last_at ? `（${dateText(entry.last_at)}）` : ""}。是否再次执行？已默认勾选「仅查询状态」，不会重复签到或消耗活动次数。`;
+  } else {
+    hint.textContent = "";
+  }
+  hint.hidden = !hint.textContent;
+  $("#run-dry-run").checked = done;
+  $("#run-submit").disabled = busy;
+}
 function openRun(account) {
   state.runAccount = account;
   $("#run-form").reset();
   $("#run-error").textContent = "";
   $("#run-account-name").textContent = `执行账号：${account.name}`;
+  buildRunTasks(account);
+  syncRunDialog();
   $("#run-dialog").showModal();
 }
 async function openLog(runId) {
@@ -447,9 +553,14 @@ $("#account-form").addEventListener("submit", event => {
     await refresh();
   });
 });
+$("#run-task").addEventListener("change", syncRunDialog);
 $("#run-form").addEventListener("submit", event => {
   event.preventDefault();
   const form = event.currentTarget;
+  const chosen = form.elements.task.value;
+  const entry = runTaskEntry(state.runAccount, chosen);
+  if (!form.elements.dry_run.checked && chosen !== "fee" && entry.state === "success"
+      && !window.confirm(`${tasks[chosen]}已经执行成功，确定再次真实执行吗？`)) return;
   submit(form, "#run-error", async () => {
     const result = await api(`/accounts/${state.runAccount.id}/run`, "POST", {
       task: form.elements.task.value, dry_run: form.elements.dry_run.checked,
@@ -714,7 +825,7 @@ $("#account-search").addEventListener("keydown", event => {
   if (event.key === "Escape") { event.preventDefault(); setAccountQuery(""); }
 });
 $("#account-search-clear").addEventListener("click", () => { setAccountQuery(""); $("#account-search").focus(); });
-$("#no-match-clear").addEventListener("click", () => { setAccountQuery(""); $("#account-search").focus(); });
+$("#no-match-clear").addEventListener("click", () => { state.accountStatus = ""; setAccountQuery(""); $("#account-search").focus(); });
 $("#add-account").addEventListener("click", () => openAccount());
 $("#empty-add").addEventListener("click", () => openAccount());
 $("#refresh").addEventListener("click", () => refresh());

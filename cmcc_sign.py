@@ -31,6 +31,8 @@
 退出码：0 = 签到成功或今日已签；1 = 失败（便于 CI 判断）
 """
 
+from cmcc_app import results as task_result
+
 import argparse
 import ipaddress
 import json
@@ -286,6 +288,12 @@ def exchange_session(cfg: Config, act_url: str | None = None) -> tuple[requests.
         r = s.post(login_url, json={**base_body, "jwtToken": None, "token": cfg.app_token}, timeout=30)
         resp = r.json()
         if resp.get("code") != "SUCCESS":
+            message = str(resp.get("msg") or "").lower()
+            if (any(word in message for word in ("token", "jwt", "凭证", "票据", "会话", "登录", "认证"))
+                    and any(word in message for word in ("过期", "失效", "无效", "expired", "invalid"))):
+                task_result.auth(False)
+            else:
+                task_result.mark("failed", "login")
             # App 票据失效是脚本唯一的"需要人工介入"场景
             raise RuntimeError(
                 f"appTokenLogin 失败: {resp.get('code')} {resp.get('msg')} —— "
@@ -306,6 +314,7 @@ def exchange_session(cfg: Config, act_url: str | None = None) -> tuple[requests.
         raise RuntimeError("未取得活动会话令牌，会话兑换失败")
     token_name = next(n for n in s.cookies.keys() if n.endswith("SESSION_TOKEN"))
     log.info("活动会话建立成功（%s）", token_name)
+    task_result.auth(True)
     return s, data["url"]
 
 
@@ -374,6 +383,8 @@ def claim_task_awards(s: requests.Session, referer: str, status_data: dict) -> l
             amount = f"{value}{unit}" if value else ""
             results.append(f"{label(task)} 领到: {data['prizeName']}" + (f"（{amount}）" if amount else ""))
         else:
+            if resp.get("code") != "SUCCESS":
+                task_result.mark("failed", "business")
             status_text = resp.get("status") or resp.get("code") or "?"
             results.append(f"{label(task)}: {status_text} {resp.get('msg')}")
         time.sleep(random.uniform(1, 2))
@@ -566,6 +577,7 @@ def run(cfg: Config, dry_run: bool, claim: bool = True, tasks: bool = False,
 
     lines = []
     if signed_today:
+        task_result.mark("success", "already")
         lines.append(f"今日已签到（累计 {acc} 天），无需操作")
     elif dry_run:
         lines.append(f"[dry-run] 今日未签，累计 {acc} 天")
@@ -594,11 +606,15 @@ def run(cfg: Config, dry_run: bool, claim: bool = True, tasks: bool = False,
             detail = f"签到失败: {code} / {status} / {msg}"
             notify_task(cfg, "移动签到失败", detail)
             log.error(detail)
+            task_result.mark("failed", "business")
             return 1
+
+    task_result.mark("success", "already" if signed_today else "ok")
 
     # 领奖：门槛达标的累计/连签奖励不会自动发放（App 是打开签到页弹窗时领），
     # 这里默认代领。dry-run 下只报「可领未领」，不做任何写操作。
     if claim:
+        task_result.begin("claim")
         try:
             latest = query_markstatus(s, referer)
             chances = latest.get("taskAwardChance") or []
@@ -609,12 +625,15 @@ def run(cfg: Config, dry_run: bool, claim: bool = True, tasks: bool = False,
                 if not chances:
                     lines.append("[领奖] 当前无可领取的累计/连签奖励")
             elif not chances:
+                task_result.mark("success", "empty")
                 log.info("[领奖] 当前无可领取的累计/连签奖励")
             else:
                 for line in claim_task_awards(s, referer, latest):
                     log.info("[领奖] %s", line)
                     lines.append(f"[领奖] {line}")
+            task_result.mark("success", "empty" if not chances else "ok")
         except Exception as e:
+            task_result.error(e)
             lines.append(f"[领奖] 尝试失败: {e}")
 
     # 拓展活动（可选模块 cmcc_extra.py，缺失时静默跳过）
@@ -622,21 +641,31 @@ def run(cfg: Config, dry_run: bool, claim: bool = True, tasks: bool = False,
         try:
             import cmcc_extra
         except ImportError:
+            for part, enabled in (("tasks", tasks), ("games", games)):
+                if enabled:
+                    task_result.begin(part)
+                    task_result.mark("skipped", "missing")
             lines.append("[拓展] 未找到 cmcc_extra.py，已跳过")
         else:
             if tasks:
+                task_result.begin("tasks")
                 try:
                     line = cmcc_extra.run_mark_tasks(s, referer, cfg, dry_run)
                     log.info("[AI豆任务] %s", line)
                     lines.append(f"[AI豆任务] {line}")
+                    task_result.mark()
                 except Exception as e:
+                    task_result.error(e)
                     lines.append(f"[AI豆任务] 失败: {e}")
             if games:
+                task_result.begin("games")
                 try:
                     for line in cmcc_extra.run_games(cfg, dry_run):
                         log.info("[拓展活动] %s", line)
                         lines.append(f"[拓展] {line}")
+                    task_result.mark()
                 except Exception as e:
+                    task_result.error(e)
                     lines.append(f"[拓展活动] 失败: {e}")
 
     # 周三充值日拼图抽奖（可选模块 cmcc_wed.py，缺失时静默跳过）
@@ -695,6 +724,7 @@ def main() -> int:
         return run(cfg, dry_run=args.dry_run, claim=args.claim,
                    tasks=args.tasks, games=args.games, wed=args.wed)
     except Exception as e:
+        task_result.error(e)
         log.exception("执行失败: %s", e)
         notify_task(cfg, "移动签到异常", f"{e}")
         return 1

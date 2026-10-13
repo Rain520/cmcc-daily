@@ -23,7 +23,7 @@ def utcnow():
 
 
 TASK_ORDER = ("sign", "wed", "rate", "fee")
-RUN_STATUSES = ("queued", "running", "success", "failed", "interrupted")
+RUN_STATUSES = ("queued", "running", "success", "partial", "failed", "interrupted")
 RUN_SOURCES = ("manual", "schedule", "import")
 DATE_PATTERN = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
 SCHEDULE_FREQUENCIES = ("daily", "weekly")
@@ -240,14 +240,24 @@ class Store:
                     status TEXT NOT NULL, created_at TEXT NOT NULL, started_at TEXT,
                     finished_at TEXT, exit_code INTEGER, message TEXT NOT NULL DEFAULT ''
                 );
-                CREATE UNIQUE INDEX IF NOT EXISTS one_pending_per_account
-                    ON runs(account_id) WHERE status IN ('queued', 'running');
+                CREATE UNIQUE INDEX IF NOT EXISTS one_pending_per_account_task
+                    ON runs(account_id, task) WHERE status IN ('queued', 'running');
                 CREATE INDEX IF NOT EXISTS runs_created ON runs(created_at DESC);
             """)
+            # 1.6.3 起同一账号的不同任务可以并存于队列，只限制同一任务重复提交。
+            conn.execute("DROP INDEX IF EXISTS one_pending_per_account")
             # 1.3 及更早版本只有一条每日签到计划，旧记录按原有列还原。
             columns = {row["name"] for row in conn.execute("PRAGMA table_info(accounts)")}
             if "schedules" not in columns:
                 conn.execute("ALTER TABLE accounts ADD COLUMN schedules TEXT")
+
+            for name in ("status_reset_at", "fee_reset_at"):
+                if name not in columns:
+                    conn.execute(f"ALTER TABLE accounts ADD COLUMN {name} TEXT NOT NULL DEFAULT ''")
+            run_columns = {row["name"] for row in conn.execute("PRAGMA table_info(runs)")}
+            if "result" not in run_columns:
+                conn.execute("ALTER TABLE runs ADD COLUMN result TEXT")
+            conn.execute("CREATE INDEX IF NOT EXISTS runs_account_task ON runs(account_id,task,dry_run,created_at DESC)")
 
     @contextmanager
     def connect(self):
@@ -292,6 +302,10 @@ class Store:
             schedules = {task: dict(account.get("schedules", {}).get(task) or empty_schedule())
                          for task in TASK_ORDER}
             if current is not None:
+                old_config = json.loads(current["config"])
+                for field, column in (("app_token", "status_reset_at"), ("fee_session_cookie", "fee_reset_at")):
+                    if old_config.get(field) != account["config"].get(field):
+                        conn.execute(f"UPDATE accounts SET {column}=? WHERE id=?", (utcnow().isoformat(), account["id"]))
                 previous = decode_schedules(dict(current).get("schedules"), dict(current))
                 for task, entry in schedules.items():
                     old = previous.get(task) or {}
@@ -304,8 +318,8 @@ class Store:
             account.update(schedule_mirrors(schedules))
             try:
                 conn.execute("""INSERT INTO accounts
-                    (id,name,phone,config,options,enabled,schedule_time,next_run,schedules)
-                    VALUES (?,?,?,?,?,?,?,?,?)
+                    (id,name,phone,config,options,enabled,schedule_time,next_run,schedules,status_reset_at,fee_reset_at)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?)
                     ON CONFLICT(id) DO UPDATE SET name=excluded.name, phone=excluded.phone,
                     config=excluded.config, options=excluded.options, enabled=excluded.enabled,
                     schedule_time=excluded.schedule_time, next_run=excluded.next_run,
@@ -313,7 +327,8 @@ class Store:
                     (account["id"], account["name"], account["config"]["phone"],
                      json.dumps(account["config"]), json.dumps(account["options"]),
                      account["enabled"], account["schedule_time"], account["next_run"],
-                     json.dumps(schedules, ensure_ascii=False)))
+                     json.dumps(schedules, ensure_ascii=False),
+                     account.get("status_reset_at", ""), account.get("fee_reset_at", "")))
             except sqlite3.IntegrityError:
                 raise ValueError("此手机号已经存在") from None
 
@@ -334,7 +349,7 @@ class Store:
                 VALUES (?,?,?,?,?,?,'queued',?)""",
                 (run_id, account["id"], account["name"], task, dry_run, source, now))
         except sqlite3.IntegrityError:
-            raise ValueError("该账号已有待执行或运行中的任务") from None
+            raise ValueError(f"{TASKS[task]}已在排队或执行中，请等它结束后再提交") from None
         return run_id
 
     def enqueue(self, account_id, task, dry_run=False):
@@ -388,10 +403,13 @@ class Store:
                          (utcnow().isoformat(), row["id"]))
             return dict(row)
 
-    def finish(self, run_id, status, exit_code, message=""):
+    def finish(self, run_id, status, exit_code, message="", result=None):
         with self.connect() as conn:
-            conn.execute("UPDATE runs SET status=?,exit_code=?,message=?,finished_at=? WHERE id=?",
-                         (status, exit_code, message, utcnow().isoformat(), run_id))
+            from .results import clean
+            result = clean(result)
+            conn.execute("UPDATE runs SET status=?,exit_code=?,message=?,finished_at=?,result=? WHERE id=?",
+                         (status, exit_code, message, utcnow().isoformat(),
+                          json.dumps(result) if result else None, run_id))
 
     def recover(self):
         with self.connect() as conn:
@@ -502,6 +520,14 @@ class Store:
             return [row["account_id"] for row in conn.execute(
                 "SELECT DISTINCT account_id FROM runs WHERE status IN ('queued','running')")]
 
+    def pending_tasks(self):
+        """每个账号各自待执行/运行中的任务；界面据此只禁用对应那一项。"""
+        with self.connect() as conn:
+            return [{"account_id": row["account_id"], "task": row["task"], "status": row["status"]}
+                    for row in conn.execute(
+                        "SELECT account_id, task, status FROM runs "
+                        "WHERE status IN ('queued','running') ORDER BY created_at")]
+
     def clear(self):
         """清空账号、执行记录和对应日志，用于替换导入或重置实例。"""
         with self.connect() as conn:
@@ -521,11 +547,11 @@ class Store:
             for row in rows:
                 cursor = conn.execute("""INSERT OR IGNORE INTO runs
                     (id,account_id,account_name,task,dry_run,source,status,created_at,
-                     started_at,finished_at,exit_code,message)
-                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                     started_at,finished_at,exit_code,message,result)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (row["id"], row["account_id"], row["account_name"], row["task"],
                      row["dry_run"], row["source"], row["status"], row["created_at"],
-                     row["started_at"], row["finished_at"], row["exit_code"], row["message"]))
+                     row["started_at"], row["finished_at"], row["exit_code"], row["message"], row.get("result")))
                 inserted += cursor.rowcount
         return inserted
 

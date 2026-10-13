@@ -180,8 +180,12 @@ def create_app(settings, start_manager=False):
     @app.get("/api/accounts")
     @authenticated
     def accounts():
-        return jsonify(accounts=[public_account(a) for a in store.accounts()],
-                       healthy=manager.healthy(), pending=store.pending_account_ids())
+        from .account_status import summaries
+        accounts = store.accounts()
+        statuses = summaries(store, accounts, settings.timezone)
+        return jsonify(accounts=[{**public_account(a), "summary": statuses[a["id"]]} for a in accounts],
+                       healthy=manager.healthy(), pending=store.pending_account_ids(),
+                       pending_tasks=store.pending_tasks())
 
     @app.post("/api/accounts")
     @authenticated
