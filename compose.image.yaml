@@ -1,9 +1,10 @@
-# Published image: rain5201/cmcc-daily:1.2.0 (linux/amd64 and linux/arm64).
+# Published image: rain5201/cmcc-daily:1.3.0 (linux/amd64 and linux/arm64).
+# 1.3.0 新增网页端加密备份导出与导入，换服务器可直接迁移账号与凭证。
 # CMCC_WEB_PASSWORD in the adjacent .env file seeds the first start (default 123456,
 # change it in the web UI afterwards); CMCC_IMAGE can override the tag.
 services:
   cmcc:
-    image: ${CMCC_IMAGE:-rain5201/cmcc-daily:1.2.0}
+    image: ${CMCC_IMAGE:-rain5201/cmcc-daily:1.3.0}
     restart: unless-stopped
     init: true
     ports:

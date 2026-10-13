@@ -275,6 +275,119 @@ $("#password-form").addEventListener("submit", event => {
     toast("管理密码已修改");
   });
 });
+function backupReport(items) {
+  $("#backup-result").replaceChildren(...items.map(([text, kind]) => node("span", text, kind)));
+}
+function backupBusy(control, busy, label) {
+  control.disabled = busy;
+  control.textContent = busy ? label : control.dataset.label;
+}
+function downloadBlob(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const link = node("a");
+  link.href = url;
+  link.download = filename;
+  link.rel = "noopener";
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 30000);
+}
+function resetBackupForm() {
+  ["#export-password", "#export-passphrase", "#export-passphrase-confirm", "#import-passphrase"].forEach(selector => { $(selector).value = ""; });
+  $("#import-file").value = "";
+  $("#import-mode").value = "merge";
+  $("#import-password").checked = true;
+  $("#import-history").checked = true;
+  $("#export-include-password").checked = true;
+  backupReport([["导出文件包含全部账号凭证，请只保存在可信位置。", "pending"]]);
+}
+async function exportBackup() {
+  const control = $("#export-backup");
+  const password = $("#export-password").value;
+  const passphrase = $("#export-passphrase").value;
+  if (!password) return backupReport([["请输入当前管理密码。", "fail"]]);
+  if (passphrase !== $("#export-passphrase-confirm").value) return backupReport([["两次输入的备份密码不一致。", "fail"]]);
+  if (passphrase.length < 8) return backupReport([["备份密码至少 8 位。", "fail"]]);
+  control.dataset.label = control.dataset.label || control.textContent;
+  backupBusy(control, true, "正在生成备份…");
+  backupReport([["正在加密导出，请稍候…", "pending"]]);
+  try {
+    const response = await fetch("/api/backup/export", {
+      method: "POST", credentials: "same-origin",
+      headers: { "Content-Type": "application/json", "X-CSRF-Token": state.csrf },
+      body: JSON.stringify({
+        password, passphrase,
+        include_password: $("#export-include-password").checked,
+        include_history: true, include_cache: true,
+      }),
+    });
+    if (!response.ok) {
+      const result = await response.json().catch(() => ({}));
+      if (response.status === 401) showLogin();
+      throw new Error(result.error || "导出失败，请稍后重试");
+    }
+    const blob = await response.blob();
+    const match = /filename="([^"]+)"/.exec(response.headers.get("Content-Disposition") || "");
+    downloadBlob(blob, match ? match[1] : "cmcc-backup.json");
+    $("#export-password").value = "";
+    backupReport([["备份已下载，请连同备份密码一起保存；忘记密码将无法导入。", "ok"]]);
+    toast("加密备份已下载");
+  } catch (error) {
+    backupReport([[error.message, "fail"]]);
+  } finally {
+    backupBusy(control, false, "");
+  }
+}
+async function importBackup() {
+  const control = $("#import-backup");
+  const file = $("#import-file").files[0];
+  const passphrase = $("#import-passphrase").value;
+  const mode = $("#import-mode").value;
+  if (!file) return backupReport([["请先选择备份文件。", "fail"]]);
+  if (!passphrase) return backupReport([["请输入备份密码。", "fail"]]);
+  if (mode === "replace" && !window.confirm("替换导入会删除当前全部账号和执行记录，确定继续吗？")) return;
+  control.dataset.label = control.dataset.label || control.textContent;
+  backupBusy(control, true, "正在导入…");
+  backupReport([["正在校验并导入备份…", "pending"]]);
+  try {
+    const form = new FormData();
+    form.append("file", file);
+    form.append("passphrase", passphrase);
+    form.append("mode", mode);
+    form.append("restore_password", $("#import-password").checked ? "true" : "false");
+    form.append("import_history", $("#import-history").checked ? "true" : "false");
+    const response = await fetch("/api/backup/import", {
+      method: "POST", credentials: "same-origin", headers: { "X-CSRF-Token": state.csrf }, body: form,
+    });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      if (response.status === 401) showLogin();
+      throw new Error(result.error || "导入失败，请检查备份密码");
+    }
+    if (result.csrf) state.csrf = result.csrf;
+    $("#password-warning").hidden = !result.weak_password;
+    const lines = [
+      [`导入完成：新增 ${result.added} 个账号` + (result.skipped_total ? `，跳过 ${result.skipped_total} 个已存在账号` : "") + "。", "ok"],
+      [`执行记录 ${result.runs} 条、日志 ${result.logs} 个、JWT 缓存 ${result.cache} 个。`, "ok"],
+      [result.password_restored ? "管理密码已按备份恢复，请使用备份所属实例的密码登录。" : "保留了当前实例的管理密码。", "ok"],
+    ];
+    if (result.skipped && result.skipped.length) lines.push([`已跳过：${result.skipped.join("、")}`, "pending"]);
+    backupReport(lines);
+    $("#import-passphrase").value = "";
+    $("#import-file").value = "";
+    toast("备份导入完成");
+    await refresh();
+  } catch (error) {
+    backupReport([[error.message, "fail"]]);
+  } finally {
+    backupBusy(control, false, "");
+  }
+}
+$("#backup").addEventListener("click", () => { resetBackupForm(); $("#backup-dialog").showModal(); });
+$("#export-backup").addEventListener("click", exportBackup);
+$("#import-backup").addEventListener("click", importBackup);
+$("#backup-dialog").addEventListener("close", () => { $("#import-passphrase").value = ""; $("#import-file").value = ""; });
 $("#logout").addEventListener("click", async () => {
   try { await api("/logout", "POST", {}); showLogin(); } catch (error) { toast(error.message, true); }
 });

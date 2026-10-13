@@ -9,10 +9,12 @@ import time
 from datetime import datetime, timedelta
 from functools import wraps
 
-from flask import Flask, jsonify, render_template, request, session
+from flask import Flask, Response, jsonify, render_template, request, session
 from werkzeug.exceptions import HTTPException
 
 from .auth import AuthStore
+from .backup import (MAX_FILE_BYTES, apply_payload, build_payload, check_passphrase,
+                      decrypt_payload, encrypt_payload)
 from .logging_utils import redact
 from .models import TASKS, Store, normalize_account, public_account
 from .runner import Manager
@@ -36,7 +38,8 @@ def create_app(settings, start_manager=False):
 
     app.config.update(
         SECRET_KEY=session_secret(),
-        MAX_CONTENT_LENGTH=64 * 1024, SESSION_COOKIE_HTTPONLY=True,
+        # 导入备份需要上传文件，其余接口只接收很小的 JSON 请求。
+        MAX_CONTENT_LENGTH=MAX_FILE_BYTES + 64 * 1024, SESSION_COOKIE_HTTPONLY=True,
         SESSION_COOKIE_SAMESITE="Strict", SESSION_COOKIE_SECURE=settings.secure_cookie,
         PERMANENT_SESSION_LIFETIME=timedelta(hours=12), SESSION_REFRESH_EACH_REQUEST=False,
     )
@@ -271,6 +274,64 @@ def create_app(settings, start_manager=False):
             raise ValueError("任务已结束")
         manager.cancel(run_id)
         return jsonify(ok=True)
+
+    @app.post("/api/backup/export")
+    @authenticated
+    def backup_export():
+        data = body()
+        # 导出文件可以还原全部凭证，因此要求重新输入当前密码并沿用登录限速。
+        address, now = request.remote_addr, time.monotonic()
+        count, until = failures(address, now)
+        if count >= 5:
+            return jsonify(error="密码尝试次数过多，请 5 分钟后再试"), 429
+        password = data.get("password", "")
+        if not isinstance(password, str) or not auth.verify(password):
+            fail(address, count, until)
+            return jsonify(error="当前管理密码不正确"), 403
+        clear_failures(address)
+        passphrase = check_passphrase(data.get("passphrase"))
+        flags = {}
+        for field, default in (("include_password", True), ("include_history", True), ("include_cache", True)):
+            value = data.get(field, default)
+            if not isinstance(value, bool):
+                raise ValueError("导出选项必须为布尔值")
+            flags[field] = value
+        payload, stats = build_payload(store, auth, settings, **flags)
+        raw = encrypt_payload(payload, passphrase)
+        logging.getLogger("cmcc_app").info(
+            "已导出备份：%s 个账号、%s 条执行记录，包含管理密码=%s", stats["accounts"], stats["runs"], stats["password"])
+        filename = f"cmcc-backup-{datetime.now().strftime('%Y%m%d-%H%M%S')}.json"
+        return Response(raw, mimetype="application/json",
+                        headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+
+    @app.post("/api/backup/import")
+    @authenticated
+    def backup_import():
+        upload = request.files.get("file")
+        if upload is None or not upload.filename:
+            raise ValueError("请选择备份文件")
+        raw = upload.read(MAX_FILE_BYTES + 1)
+        if len(raw) > MAX_FILE_BYTES:
+            raise ValueError("备份文件超过 8 MiB")
+        payload = decrypt_payload(raw, check_passphrase(request.form.get("passphrase", "")))
+        summary = apply_payload(
+            store, auth, payload,
+            mode=request.form.get("mode", "merge"),
+            restore_password=request.form.get("restore_password", "true") == "true",
+            import_history=request.form.get("import_history", "true") == "true",
+            timezone_name=settings.timezone)
+        if summary["password_restored"]:
+            # 会话签名材料随密码变化，当前页面用新会话继续使用，其他会话失效。
+            app.config["SECRET_KEY"] = session_secret()
+            logging.getLogger("cmcc_app").info("已按备份恢复管理密码，此前的登录会话已失效")
+            session_state = start_session()
+        else:
+            session_state = {"csrf": session["csrf"], "timezone": settings.timezone,
+                             "weak_password": auth.is_default}
+        logging.getLogger("cmcc_app").info(
+            "已导入备份：新增 %s 个账号，跳过 %s 个，历史记录 %s 条",
+            summary["added"], summary["skipped_total"], summary["runs"])
+        return jsonify(ok=True, **summary, **session_state)
 
     if start_manager:
         manager.start()

@@ -247,9 +247,42 @@ class Store:
             conn.execute("""UPDATE runs SET status='interrupted',finished_at=?,
                 message='上次应用停止时任务未结束，未自动重试' WHERE status='running'""", (utcnow().isoformat(),))
 
-    def runs(self):
+    def runs(self, limit=100):
         with self.connect() as conn:
-            return [dict(row) for row in conn.execute("SELECT * FROM runs ORDER BY created_at DESC LIMIT 100")]
+            return [dict(row) for row in conn.execute(
+                "SELECT * FROM runs ORDER BY created_at DESC LIMIT ?", (limit,))]
+
+    def pending_runs(self):
+        with self.connect() as conn:
+            return conn.execute(
+                "SELECT 1 FROM runs WHERE status IN ('queued','running') LIMIT 1").fetchone() is not None
+
+    def clear(self):
+        """清空账号、执行记录和对应日志，用于替换导入或重置实例。"""
+        with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            for row in conn.execute("SELECT id FROM runs").fetchall():
+                (self.data_dir / "logs" / f"{row['id']}.log").unlink(missing_ok=True)
+            conn.execute("DELETE FROM runs")
+            conn.execute("DELETE FROM accounts")
+
+    def add_history(self, rows):
+        """导入历史记录；已存在的记录保留原样，返回新增条数。"""
+        if not rows:
+            return 0
+        inserted = 0
+        with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            for row in rows:
+                cursor = conn.execute("""INSERT OR IGNORE INTO runs
+                    (id,account_id,account_name,task,dry_run,source,status,created_at,
+                     started_at,finished_at,exit_code,message)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (row["id"], row["account_id"], row["account_name"], row["task"],
+                     row["dry_run"], row["source"], row["status"], row["created_at"],
+                     row["started_at"], row["finished_at"], row["exit_code"], row["message"]))
+                inserted += cursor.rowcount
+        return inserted
 
     def run(self, run_id):
         with self.connect() as conn:

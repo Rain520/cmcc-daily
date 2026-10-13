@@ -83,6 +83,30 @@ class AuthStore:
             atomic_json(self.path, record)
             self.record = record
 
+    def export_record(self):
+        """导出散列记录供备份使用；不含明文密码。"""
+        with self.lock:
+            return dict(self.record)
+
+    def restore(self, record):
+        """按备份中的散列恢复管理密码，导入后可继续使用原密码登录。"""
+        if not isinstance(record, dict):
+            raise ValueError("备份中的管理密码记录格式不正确")
+        try:
+            salt, digest = str(record["salt"]), str(record["hash"])
+            iterations = int(record["iterations"])
+            bytes.fromhex(salt)
+            bytes.fromhex(digest)
+            if not 10000 <= iterations <= 5000000 or len(digest) != 64 or len(salt) < 16:
+                raise ValueError
+        except (KeyError, TypeError, ValueError):
+            raise ValueError("备份中的管理密码记录已损坏，无法恢复") from None
+        restored = {"version": 1, "salt": salt, "hash": digest, "iterations": iterations,
+                    "changed_at": record.get("changed_at") or utcnow()}
+        with self.lock:
+            atomic_json(self.path, restored)
+            self.record = {"version": 1, "salt": salt, "hash": digest, "iterations": iterations}
+
     @property
     def fingerprint(self):
         """用于派生会话签名材料；密码变化后取值随之变化。"""

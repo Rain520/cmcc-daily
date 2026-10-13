@@ -67,6 +67,12 @@ for path in (data / 'auth.json', data / 'app.lock', data / 'cache' / 'fixture.js
             with client.open(req, timeout=http_timeout) as response:
                 return json.load(response)
 
+        def request_file(path, body, content_type, csrf):
+            req = Request(base + path, method="POST", data=body,
+                          headers={"Content-Type": content_type, "X-CSRF-Token": csrf})
+            with client.open(req, timeout=http_timeout) as response:
+                return response.headers, response.read()
+
         def wait_ready():
             for _ in range(60):
                 try:
@@ -110,6 +116,15 @@ for path in (data / 'auth.json', data / 'app.lock', data / 'cache' / 'fixture.js
         saved = request("/api/accounts")["accounts"]
         assert saved[0]["id"] == account["id"], "account did not survive restart"
         assert saved[0]["has_webhook_url"] and saved[0]["has_webhook_token"]
+
+        # 备份导出：文件整体加密，换服务器后导入即可恢复账号与凭证。
+        headers, exported = request_file("/api/backup/export", json.dumps({
+            "password": password, "passphrase": "smoke-backup-passphrase",
+            "include_password": True, "include_history": True, "include_cache": True,
+        }).encode(), "application/json", csrf)
+        assert headers["Content-Disposition"].startswith('attachment; filename="cmcc-backup-'), headers
+        assert exported.startswith(b"{") and b"cmcc-backup" in exported, exported[:80]
+        assert b"test-never-send" not in exported and b"test-hook-token" not in exported and password.encode() not in exported
         try:
             request("/api/login", "POST", {"password": env["CMCC_WEB_PASSWORD"]})
             raise AssertionError("CMCC_WEB_PASSWORD overrode the password stored in the volume")
@@ -121,6 +136,26 @@ for path in (data / 'auth.json', data / 'app.lock', data / 'cache' / 'fixture.js
         assert not cleared["has_webhook_url"] and not cleared["has_webhook_token"]
         assert request("/api/runs")["runs"] == [], "disabled account ran unexpectedly"
         request(f"/api/accounts/{account['id']}", "DELETE", csrf=csrf)
+        assert request("/api/accounts")["accounts"] == []
+
+        # 导入备份：账号、通知凭证和计划一并恢复，无需重新配置。
+        boundary = "----cmcc-smoke-" + secrets.token_hex(8)
+        body = b""
+        for field, value in (("passphrase", "smoke-backup-passphrase"), ("mode", "replace"),
+                             ("restore_password", "false"), ("import_history", "true")):
+            body += (f'--{boundary}\r\nContent-Disposition: form-data; name="{field}"\r\n\r\n{value}\r\n').encode()
+        body += (f'--{boundary}\r\nContent-Disposition: form-data; name="file"; '
+                 f'filename="cmcc-backup.json"\r\nContent-Type: application/json\r\n\r\n').encode()
+        body += exported + f"\r\n--{boundary}--\r\n".encode()
+        _, payload = request_file("/api/backup/import", body, f"multipart/form-data; boundary={boundary}", csrf)
+        summary = json.loads(payload)
+        assert summary["added"] == 1 and summary["password_restored"] is False, summary
+        restored_accounts = request("/api/accounts")["accounts"]
+        assert len(restored_accounts) == 1, restored_accounts
+        restored_account = restored_accounts[0]
+        assert restored_account["name"] == "Docker smoke test"
+        assert restored_account["has_webhook_url"] and restored_account["has_webhook_token"], restored_account
+        assert request(f"/api/accounts/{restored_account['id']}", "DELETE", csrf=csrf)["ok"]
         assert request("/api/accounts")["accounts"] == []
         processes = json.loads(docker("exec", name, "python", "-c", """
 import json
@@ -158,7 +193,8 @@ assert paths[-1].read_bytes() == b'{"test":"never-send"}'
         docker("exec", name, "python", "-m", "cmcc_app.bootstrap", "healthcheck")
         print(f"Docker smoke passed: {mount_type}, UID/GID={uid}:{gid}, UMASK={mask}; "
               "permission repair, login, password change, CRUD, restart persistence, "
-              "runtime identity/capabilities, read-only filesystem, healthcheck")
+              "encrypted backup export and import, runtime identity/capabilities, "
+              "read-only filesystem, healthcheck")
     except Exception:
         subprocess.run(["docker", "logs", name], check=False)
         raise
