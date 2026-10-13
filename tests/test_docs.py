@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-DOCUMENTS = ("README.md", "docs/FEINIU.md", "docs/PUBLISHING.md", "docs/VALIDATION.md")
+DOCUMENTS = ("README.md", "AGENTS.md", "docs/FEINIU.md", "docs/PUBLISHING.md", "docs/VALIDATION.md")
 PREVIEW_IMAGES = ("dashboard-accounts.png", "dashboard-history.png",
                   "dashboard-accounts-mobile.jpg", "dashboard-history-mobile.jpg")
 
