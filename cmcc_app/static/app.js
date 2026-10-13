@@ -1,6 +1,7 @@
 "use strict";
 const $ = (selector) => document.querySelector(selector);
-const state = { csrf: "", timezone: "Asia/Shanghai", accounts: [], runs: [], editing: null, runAccount: null, logId: null, deleting: null, authenticated: false };
+const state = { csrf: "", timezone: "Asia/Shanghai", accounts: [], runs: [], editing: null, runAccount: null, logId: null, deleting: null, authenticated: false,
+  runsTotal: 0, runsPages: 1, runsPage: 1, runsPageSize: 20, runsLatest: null, runsCounts: {}, runsScanned: null, selected: new Set(), runsLoading: false };
 const labels = { queued: "等待执行", running: "正在执行", success: "执行完成", failed: "执行失败", interrupted: "已停止" };
 const tasks = { sign: "每日签到", wed: "周三拼图", rate: "评价有礼", fee: "话费查询" };
 const taskOrder = ["sign", "wed", "rate", "fee"];
@@ -174,7 +175,7 @@ function renderAccounts() {
       if (account.options[key]) tags.append(node("span", text, "card-tag"));
     }
     const actions = node("div", undefined, "card-actions");
-    const pending = state.runs.some(r => r.account_id === account.id && isPending(r));
+    const pending = state.pendingAccounts.has(account.id);
     const runButton = button(pending ? "任务执行中…" : "手动执行  →", "button primary", () => openRun(account));
     runButton.disabled = pending;
     actions.append(runButton, button("编辑", "button secondary", () => openAccount(account)), button("删除", "text-button delete-button", () => openDelete(account)));
@@ -186,40 +187,152 @@ function renderRuns() {
   const list = $("#run-list");
   list.replaceChildren();
   $("#empty-runs").hidden = state.runs.length > 0;
+  $("#run-count").textContent = state.runsTotal;
+  const pendingIds = new Set(state.runs.filter(isPending).map(run => run.id));
   for (const run of state.runs) {
     const row = node("tr");
+    if (state.selected.has(run.id)) row.className = "selected";
+    const check = node("td", undefined, "check-cell");
+    const box = node("input");
+    box.type = "checkbox";
+    box.checked = state.selected.has(run.id);
+    box.setAttribute("aria-label", `选择 ${run.account_name} 的记录`);
+    box.addEventListener("change", () => {
+      if (box.checked) state.selected.add(run.id); else state.selected.delete(run.id);
+      row.classList.toggle("selected", box.checked);
+      syncSelection();
+    });
+    check.append(box);
     const first = node("td");
     first.append(node("span", run.account_name, "run-name"), node("span", `${tasks[run.task] || run.task}${run.dry_run ? " · 仅查询" : ""}`, "run-task"));
     const status = node("td");
     status.append(node("span", labels[run.status] || run.status, `badge ${run.status}`));
     const detail = node("td", undefined, "align-right");
     detail.append(button("查看日志 ↗", "text-button", () => openLog(run.id)));
-    row.append(first, node("td", dateText(run.created_at)), node("td", run.source === "schedule" ? "计划任务" : "手动执行"), status, detail);
+    row.append(check, first, node("td", dateText(run.created_at), "run-time"),
+               node("td", run.source === "schedule" ? "计划任务" : run.source === "import" ? "导入记录" : "手动执行"),
+               status, detail);
+    if (pendingIds.has(run.id)) row.classList.add("running-row");
     list.append(row);
   }
-  const latest = state.runs[0];
-  $("#stat-latest").textContent = latest ? labels[latest.status] : "暂无记录";
+  state.runsLatest = state.runsLatest || state.runs[0] || null;
+  const latest = state.runsLatest;
+  $("#stat-latest").textContent = latest ? labels[latest.status] || latest.status : "暂无记录";
   $("#stat-latest-note").textContent = latest ? `${latest.account_name} · ${dateText(latest.created_at)}` : "准备好后，开始第一次签到";
+  syncSelection();
+}
+function syncSelection() {
+  const visible = state.runs.map(run => run.id);
+  const chosen = visible.filter(id => state.selected.has(id));
+  $("#selection-note").textContent = state.selected.size
+    ? `已选 ${state.selected.size} 条（本页 ${chosen.length} 条）`
+    : "勾选记录后可批量删除";
+  $("#delete-selected").disabled = state.selected.size === 0;
+  const selectAll = $("#select-page");
+  selectAll.checked = visible.length > 0 && chosen.length === visible.length;
+  selectAll.indeterminate = chosen.length > 0 && chosen.length < visible.length;
+}
+function renderPager() {
+  const pages = Math.max(1, state.runsPages);
+  state.runsPage = Math.min(Math.max(1, state.runsPage), pages);
+  $("#page-info").textContent = `第 ${state.runsPage} / ${pages} 页 · 共 ${state.runsTotal} 条`;
+  $("#page-prev").disabled = state.runsPage <= 1;
+  $("#page-next").disabled = state.runsPage >= pages;
+}
+function renderRunSummary(payload) {
+  const counts = state.runsCounts || {};
+  const parts = [`共 ${state.runsTotal} 条`];
+  for (const [status, label] of [["success", "完成"], ["failed", "失败"], ["interrupted", "已停止"], ["running", "运行中"], ["queued", "排队中"]]) {
+    if (counts[status]) parts.push(`${label} ${counts[status]}`);
+  }
+  if (payload && payload.keyword) {
+    parts.push(payload.truncated ? `关键字仅搜索最近 ${payload.scanned} 条` : `关键字命中 ${state.runsTotal} 条（已搜索最近 ${payload.scanned} 条）`);
+  }
+  parts.push(`更新于 ${new Date().toLocaleTimeString("zh-CN", { hour12: false })}`);
+  $("#history-summary").textContent = parts.join(" · ");
+}
+function currentFilters() {
+  return {
+    account_id: $("#filter-account").value,
+    task: $("#filter-task").value,
+    status: $("#filter-status").value,
+    source: $("#filter-source").value,
+    date_from: $("#filter-from").value,
+    date_to: $("#filter-to").value,
+    keyword: $("#filter-keyword").value.trim(),
+  };
+}
+function runQuery() {
+  const query = new URLSearchParams();
+  for (const [key, value] of Object.entries(currentFilters())) if (value) query.set(key, value);
+  query.set("page", state.runsPage);
+  query.set("page_size", state.runsPageSize);
+  return query;
+}
+async function loadRuns(silent = false) {
+  if (state.runsLoading) return;
+  state.runsLoading = true;
+  try {
+    const query = runQuery();
+    const payload = await api(`/runs?${query.toString()}`);
+    state.runs = payload.runs;
+    state.runsTotal = payload.total;
+    state.runsPages = payload.pages;
+    state.runsPage = payload.page;
+    state.runsPageSize = payload.page_size;
+    state.runsLatest = payload.latest;
+    state.runsCounts = payload.counts || {};
+    const visible = new Set(state.runs.map(run => run.id));
+    for (const id of Array.from(state.selected)) if (!visible.has(id)) state.selected.delete(id);
+    renderRuns();
+    renderPager();
+    renderRunSummary(payload);
+  } catch (error) {
+    $("#history-summary").textContent = "记录加载失败";
+    if (!silent) toast(error.message, true);
+  } finally {
+    state.runsLoading = false;
+  }
 }
 let refreshing = false;
 async function refresh(silent = false) {
   if (!state.authenticated || refreshing) return;
   refreshing = true;
   try {
-    const [accounts, runs] = await Promise.all([api("/accounts"), api("/runs")]);
+    const accounts = await api("/accounts");
     if (!state.authenticated) return;
     state.accounts = accounts.accounts;
-    state.runs = runs.runs;
+    state.pendingAccounts = new Set(accounts.pending || []);
     $("#health").textContent = accounts.healthy ? "服务运行中" : "调度器离线";
     $("#health").className = accounts.healthy ? "health" : "health offline";
+    syncAccountFilter();
     renderAccounts();
-    renderRuns();
-    if ($("#log-dialog").open && state.logId) await updateLog();
   } catch (error) {
     $("#health").textContent = "连接异常";
     $("#health").className = "health offline";
     if (!silent) toast(error.message, true);
-  } finally { refreshing = false; }
+  } finally {
+    refreshing = false;
+  }
+  await loadRuns(silent);
+  if ($("#log-dialog").open && state.logId) await updateLog();
+}
+function syncAccountFilter(force = false) {
+  const select = $("#filter-account");
+  const signature = state.accounts.map(account => `${account.id}:${account.name}`).join("|");
+  if (!force && select.dataset.signature === signature) return;
+  const current = select.value;
+  const options = [node("option", "全部账号")];
+  options[0].value = "";
+  for (const account of state.accounts) {
+    const label = `${account.name}（${account.config.phone.replace(/^(\d{3})\d{4}/, "$1****")}）`;
+    const option = node("option", label);
+    option.value = account.id;
+    options.push(option);
+  }
+  select.replaceChildren(...options);
+  select.dataset.signature = signature;
+  select.value = state.accounts.some(account => account.id === current) ? current : "";
 }
 function openAccount(account = null) {
   state.editing = account;
@@ -493,12 +606,85 @@ $("#test-notify").addEventListener("click", async () => {
     control.disabled = false;
   }
 });
+function debounce(action, wait) {
+  let timer;
+  return (...args) => {
+    clearTimeout(timer);
+    timer = setTimeout(() => action(...args), wait);
+  };
+}
+function applyFilters() {
+  state.runsPage = 1;
+  state.selected.clear();
+  return loadRuns();
+}
+async function deleteRuns(ids, message) {
+  const targets = (ids || []).filter(Boolean);
+  if (!targets.length) return;
+  if (!window.confirm(message)) return;
+  try {
+    const result = await api("/runs/delete", "POST", { ids: targets });
+    if (state.logId && targets.includes(state.logId)) $("#log-dialog").close();
+    for (const id of targets) state.selected.delete(id);
+    const parts = [`已删除 ${result.deleted} 条记录`];
+    if (result.skipped) parts.push(`${result.skipped} 条正在执行，已保留`);
+    toast(parts.join("，"));
+    await loadRuns();
+  } catch (error) {
+    toast(error.message, true);
+  }
+}
+async function deleteFilteredRuns() {
+  if (!state.runsTotal) { toast("当前筛选没有可删除的记录", true); return; }
+  if (!window.confirm(`删除当前筛选条件下的 ${state.runsTotal} 条记录？排队或运行中的记录会保留。`)) return;
+  try {
+    const result = await api("/runs/delete", "POST", { scope: "filtered", filters: currentFilters() });
+    state.selected.clear();
+    toast(result.deleted ? `已删除 ${result.deleted} 条记录` : "没有可删除的记录");
+    await loadRuns();
+  } catch (error) {
+    toast(error.message, true);
+  }
+}
+for (const selector of ["#filter-account", "#filter-task", "#filter-status", "#filter-source",
+                        "#filter-from", "#filter-to"]) {
+  $(selector).addEventListener("change", applyFilters);
+}
+$("#page-size").addEventListener("change", () => {
+  state.runsPageSize = Number($("#page-size").value) || 20;
+  applyFilters();
+});
+$("#filter-keyword").addEventListener("input", debounce(applyFilters, 350));
+$("#filter-keyword").addEventListener("keydown", event => {
+  if (event.key === "Enter") { event.preventDefault(); applyFilters(); }
+});
+$("#filter-reset").addEventListener("click", () => {
+  for (const selector of ["#filter-account", "#filter-task", "#filter-status", "#filter-source",
+                          "#filter-from", "#filter-to", "#filter-keyword"]) {
+    $(selector).value = "";
+  }
+  state.selected.clear();
+  toast("已重置筛选条件");
+  applyFilters();
+});
+$("#select-page").addEventListener("change", event => {
+  for (const run of state.runs) {
+    if (event.currentTarget.checked) state.selected.add(run.id); else state.selected.delete(run.id);
+  }
+  renderRuns();
+});
+$("#delete-selected").addEventListener("click", () => deleteRuns([...state.selected],
+  `删除所选 ${state.selected.size} 条记录？日志文件会一并删除。`));
+$("#delete-filtered").addEventListener("click", deleteFilteredRuns);
+$("#page-prev").addEventListener("click", () => { if (state.runsPage > 1) { state.runsPage -= 1; loadRuns(); } });
+$("#page-next").addEventListener("click", () => { if (state.runsPage < state.runsPages) { state.runsPage += 1; loadRuns(); } });
 $("#add-account").addEventListener("click", () => openAccount());
 $("#empty-add").addEventListener("click", () => openAccount());
 $("#refresh").addEventListener("click", () => refresh());
 document.querySelectorAll("[data-close]").forEach(control => control.addEventListener("click", () => document.getElementById(control.dataset.close).close()));
 $("#account-dialog").addEventListener("close", () => { $("#account-form").reset(); });
 $("#log-dialog").addEventListener("close", () => { state.logId = null; });
+$("#delete-run").addEventListener("click", () => deleteRuns([state.logId], "删除这条执行记录？日志文件会一并删除。"));
 document.querySelectorAll(".nav-link").forEach(link => link.addEventListener("click", () => {
   document.querySelectorAll(".nav-link").forEach(item => item.classList.toggle("active", item === link));
 }));

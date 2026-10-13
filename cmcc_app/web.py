@@ -3,11 +3,13 @@ import hmac
 import json
 import logging
 import os
+import re
 import secrets
 import threading
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from functools import wraps
+from zoneinfo import ZoneInfo
 
 from flask import Flask, Response, jsonify, render_template, request, session
 from werkzeug.exceptions import HTTPException
@@ -17,9 +19,13 @@ from .auth import AuthStore
 from .backup import (MAX_FILE_BYTES, apply_payload, build_payload, check_passphrase,
                       decrypt_payload, encrypt_payload)
 from .logging_utils import redact
-from .models import TASKS, Store, normalize_account, public_account
+from .models import (DATE_PATTERN, RUN_SOURCES, RUN_STATUSES, TASKS, Store,
+                     normalize_account, public_account)
 from .runner import Manager
 from .storage import account_key, atomic_json
+
+RUN_PAGE_SIZES = (10, 20, 50, 100)
+RUN_SEARCH_LIMIT = 1000
 
 
 def create_app(settings, start_manager=False):
@@ -174,7 +180,8 @@ def create_app(settings, start_manager=False):
     @app.get("/api/accounts")
     @authenticated
     def accounts():
-        return jsonify(accounts=[public_account(a) for a in store.accounts()], healthy=manager.healthy())
+        return jsonify(accounts=[public_account(a) for a in store.accounts()],
+                       healthy=manager.healthy(), pending=store.pending_account_ids())
 
     @app.post("/api/accounts")
     @authenticated
@@ -214,10 +221,85 @@ def create_app(settings, start_manager=False):
             return jsonify(error="调度器未运行，请检查容器状态"), 503
         return jsonify(run_id=store.enqueue(account_id, task, dry_run)), 202
 
+    def page_number(value, default, allowed=None):
+        try:
+            number = int(value)
+        except (TypeError, ValueError):
+            return default
+        return number if allowed is None or number in allowed else default
+
+    def run_query(args):
+        """解析执行记录的筛选参数；日期按设置时区换算为 UTC 边界（结束日期不含当天之后）。"""
+        def text(name, limit=64):
+            value = args.get(name)
+            return value.strip()[:limit] or None if isinstance(value, str) else None
+
+        def day(value, offset=0):
+            if not isinstance(value, str) or not DATE_PATTERN.fullmatch(value.strip()):
+                return None
+            try:
+                moment = datetime.strptime(value.strip(), "%Y-%m-%d").replace(
+                    tzinfo=ZoneInfo(settings.timezone))
+            except ValueError:
+                return None
+            return (moment + timedelta(days=offset)).astimezone(timezone.utc).isoformat()
+
+        task, status, source = text("task", 16), text("status", 16), text("source", 16)
+        return {"account_id": text("account_id", 64),
+                "task": task if task in TASKS else None,
+                "status": status if status in RUN_STATUSES else None,
+                "source": source if source in RUN_SOURCES else None,
+                "date_from": day(args.get("date_from")),
+                "date_to": day(args.get("date_to"), 1),
+                "keyword": text("keyword", 64)}
+
     @app.get("/api/runs")
     @authenticated
     def runs():
-        return jsonify(runs=store.runs())
+        filters = run_query(request.args)
+        page_size = page_number(request.args.get("page_size"), 20, RUN_PAGE_SIZES)
+        page = max(1, page_number(request.args.get("page"), 1))
+        keyword = filters.pop("keyword")
+        extra = {}
+        if keyword:
+            # 关键字同时匹配记录字段与日志正文；最多扫描最近 RUN_SEARCH_LIMIT 条记录。
+            candidates, matched_total = store.runs_page(page=1, page_size=RUN_SEARCH_LIMIT, **filters)
+            hits = store.search_run_logs(keyword, candidates)
+            folded = keyword.casefold()
+            rows = [row for row in candidates if row["id"] in hits
+                    or folded in (row["message"] or "").casefold()
+                    or folded in (row["account_name"] or "").casefold()]
+            total = len(rows)
+            page_rows = rows[(page - 1) * page_size: page * page_size]
+            extra = {"keyword": keyword, "scanned": len(candidates),
+                     "truncated": matched_total > len(candidates)}
+        else:
+            page_rows, total = store.runs_page(page=page, page_size=page_size, **filters)
+        latest = store.runs(limit=1)
+        return jsonify(runs=page_rows, total=total, page=page, page_size=page_size,
+                       pages=max(1, -(-total // page_size)),
+                       latest=latest[0] if latest else None,
+                       counts=store.run_status_counts(**filters), **extra)
+
+    @app.post("/api/runs/delete")
+    @authenticated
+    def delete_runs():
+        data = body()
+        ids = data.get("ids")
+        if isinstance(ids, list):
+            if not ids or len(ids) > 500 or any(not isinstance(value, str) or not value for value in ids):
+                raise ValueError("请选择要删除的执行记录")
+            deleted, pending = store.delete_runs(ids)
+            skipped = len(pending)
+        elif data.get("scope") == "filtered":
+            filters = run_query({key: value for key, value in (data.get("filters") or {}).items()
+                                 if isinstance(value, str)})
+            filters.pop("keyword", None)  # 关键字命中日志的判定不参与批量删除，避免误删
+            deleted, skipped = store.clear_runs(**filters), 0
+        else:
+            raise ValueError("请选择要删除的执行记录")
+        logging.getLogger("cmcc_app").info("已删除 %s 条执行记录，保留进行中的 %s 条", deleted, skipped)
+        return jsonify(ok=True, deleted=deleted, skipped=skipped)
 
     @app.get("/api/runs/<run_id>/log")
     @authenticated

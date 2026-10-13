@@ -23,6 +23,9 @@ def utcnow():
 
 
 TASK_ORDER = ("sign", "wed", "rate", "fee")
+RUN_STATUSES = ("queued", "running", "success", "failed", "interrupted")
+RUN_SOURCES = ("manual", "schedule", "import")
+DATE_PATTERN = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
 SCHEDULE_FREQUENCIES = ("daily", "weekly")
 WEEKDAY_NAMES = ("周一", "周二", "周三", "周四", "周五", "周六", "周日")
 DEFAULT_SCHEDULE_TIME = "08:23"
@@ -398,12 +401,106 @@ class Store:
     def runs(self, limit=100):
         with self.connect() as conn:
             return [dict(row) for row in conn.execute(
-                "SELECT * FROM runs ORDER BY created_at DESC LIMIT ?", (limit,))]
+                "SELECT * FROM runs ORDER BY created_at DESC, rowid DESC LIMIT ?", (limit,))]
+
+    @staticmethod
+    def run_where(account_id=None, task=None, status=None, source=None, date_from=None,
+                  date_to=None, keyword=None, finished_only=False):
+        """拼装执行记录的筛选条件；日期边界为 UTC ISO 文本，结束时间不包含在内。"""
+        clauses, values = [], []
+        for column, value in (("account_id", account_id), ("task", task), ("status", status),
+                              ("source", source)):
+            if value:
+                clauses.append(f"{column}=?")
+                values.append(value)
+        if date_from:
+            clauses.append("created_at>=?")
+            values.append(date_from)
+        if date_to:
+            clauses.append("created_at<?")
+            values.append(date_to)
+        if keyword:
+            clauses.append("(message LIKE ? OR account_name LIKE ?)")
+            values.extend([f"%{keyword}%"] * 2)
+        if finished_only:
+            clauses.append("status NOT IN ('queued','running')")
+        return (" WHERE " + " AND ".join(clauses)) if clauses else "", values
+
+    def runs_page(self, page=1, page_size=20, **filters):
+        """分页读取执行记录，返回 (rows, 总条数)。"""
+        where, values = self.run_where(**filters)
+        with self.connect() as conn:
+            total = conn.execute(f"SELECT COUNT(*) FROM runs{where}", values).fetchone()[0]
+            rows = conn.execute(f"""SELECT * FROM runs{where}
+                ORDER BY created_at DESC, rowid DESC LIMIT ? OFFSET ?""",
+                [*values, page_size, (page - 1) * page_size]).fetchall()
+        return [dict(row) for row in rows], int(total)
+
+    def run_status_counts(self, **filters):
+        """按状态汇总当前筛选条件（忽略状态本身）下的记录数。"""
+        filters.pop("status", None)
+        where, values = self.run_where(**filters)
+        with self.connect() as conn:
+            rows = conn.execute(f"SELECT status, COUNT(*) AS total FROM runs{where} GROUP BY status",
+                                values).fetchall()
+        return {row["status"]: int(row["total"]) for row in rows}
+
+    def search_run_logs(self, keyword, runs, max_files=1000, max_bytes=256 * 1024):
+        """在候选记录的日志正文里查找关键字；只读每个日志的开头，避免大文件拖慢查询。"""
+        needle = keyword.casefold()
+        matched = set()
+        for run in runs[:max_files]:
+            path = self.data_dir / "logs" / f"{run['id']}.log"
+            try:
+                if not path.is_file():
+                    continue
+                with path.open("rb") as stream:
+                    text = stream.read(max_bytes).decode("utf-8", errors="replace")
+            except OSError:
+                continue
+            if needle in text.casefold():
+                matched.add(run["id"])
+        return matched
+
+    def delete_runs(self, ids):
+        """删除已结束的记录与日志文件，返回 (删除条数, 仍在执行的记录 id)。"""
+        unique = list(dict.fromkeys(str(value) for value in ids if str(value)))[:500]
+        if not unique:
+            return 0, []
+        marks = ",".join("?" * len(unique))
+        with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            rows = conn.execute(f"SELECT id,status FROM runs WHERE id IN ({marks})", unique).fetchall()
+            pending = [row["id"] for row in rows if row["status"] in ("queued", "running")]
+            deletable = [row["id"] for row in rows if row["status"] not in ("queued", "running")]
+            if deletable:
+                conn.execute(f"DELETE FROM runs WHERE id IN ({','.join('?' * len(deletable))})", deletable)
+        for run_id in deletable:
+            (self.data_dir / "logs" / f"{run_id}.log").unlink(missing_ok=True)
+        return len(deletable), pending
+
+    def clear_runs(self, **filters):
+        """按筛选条件删除已结束的记录与日志；排队或运行中的记录保留。"""
+        where, values = self.run_where(**filters, finished_only=True)
+        with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            ids = [row["id"] for row in conn.execute(f"SELECT id FROM runs{where}", values)]
+            if ids:
+                conn.execute(f"DELETE FROM runs WHERE id IN ({','.join('?' * len(ids))})", ids)
+        for run_id in ids:
+            (self.data_dir / "logs" / f"{run_id}.log").unlink(missing_ok=True)
+        return len(ids)
 
     def pending_runs(self):
         with self.connect() as conn:
             return conn.execute(
                 "SELECT 1 FROM runs WHERE status IN ('queued','running') LIMIT 1").fetchone() is not None
+
+    def pending_account_ids(self):
+        """有排队或运行中任务的账号，供界面显示状态。"""
+        with self.connect() as conn:
+            return [row["account_id"] for row in conn.execute(
+                "SELECT DISTINCT account_id FROM runs WHERE status IN ('queued','running')")]
 
     def clear(self):
         """清空账号、执行记录和对应日志，用于替换导入或重置实例。"""

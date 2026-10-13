@@ -1,4 +1,4 @@
-# Published image: rain5201/cmcc-daily:1.5.0 (linux/amd64 and linux/arm64).
+# Published image: rain5201/cmcc-daily:1.6.0 (linux/amd64 and linux/arm64).
 # 1.4.0 支持每个任务独立计划（每天/每周）与「手机号+任务」通知标题。
 # CMCC_WEB_PASSWORD in the adjacent .env file seeds the first start (default 123456,
 # change it in the web UI afterwards); CMCC_IMAGE can override the tag.
