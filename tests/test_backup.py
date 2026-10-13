@@ -1,5 +1,6 @@
 import io
 import json
+import re
 import tempfile
 import unittest
 from pathlib import Path
@@ -270,6 +271,34 @@ class MigrationTests(unittest.TestCase):
         imported = {account["config"]["phone"]: account for account in new.store.accounts()}
         self.assertNotIn("unknown_field", imported["13600002222"]["config"])
         self.assertEqual(imported["13600002222"]["config"]["app_token"], "ok")
+
+
+class BackupUiTests(unittest.TestCase):
+    """界面元素与脚本选择器必须一致，否则备份入口在浏览器里会失效。"""
+
+    def setUp(self):
+        root = Path(__file__).resolve().parent.parent
+        self.html = (root / "cmcc_app" / "templates" / "index.html").read_text(encoding="utf-8")
+        self.script = (root / "cmcc_app" / "static" / "app.js").read_text(encoding="utf-8")
+        self.style = (root / "cmcc_app" / "static" / "styles.css").read_text(encoding="utf-8")
+
+    def test_backup_controls_exist_and_are_wired(self):
+        for element in ("backup", "backup-dialog", "export-backup", "import-backup", "export-password",
+                        "export-passphrase", "export-passphrase-confirm", "export-include-password",
+                        "import-file", "import-passphrase", "import-mode", "import-password",
+                        "import-history", "backup-result"):
+            self.assertIn(f'id="{element}"', self.html, element)
+            self.assertIn(f'$("#{element}")', self.script, element)
+        self.assertIn('data-close="backup-dialog"', self.html)
+        self.assertIn("/api/backup/export", self.script)
+        self.assertIn("/api/backup/import", self.script)
+        self.assertIn(".backup-section", self.style)
+
+    def test_every_script_selector_matches_the_page(self):
+        selectors = set(re.findall(r'\$\("#([A-Za-z0-9_-]+)"\)', self.script))
+        self.assertGreater(len(selectors), 20)
+        for selector in sorted(selectors):
+            self.assertIn(f'id="{selector}"', self.html, selector)
 
 
 if __name__ == "__main__":
