@@ -24,13 +24,15 @@ COPY cmcc_*.py ./
 COPY cmcc_app/ ./cmcc_app/
 
 LABEL org.opencontainers.image.title="CMCC Daily" \
+      org.opencontainers.image.version="1.2.0" \
       org.opencontainers.image.description="Self-hosted CMCC check-in dashboard based on yupaiLy/cmcc-auto-checkin"
 
-USER 10001:10001
+# The bootstrap repairs only the data mount and drops to PUID/PGID before serving.
+USER 0:0
 EXPOSE 8000
 VOLUME ["/data"]
 HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
-    CMD ["python", "-m", "cmcc_app", "healthcheck"]
+    CMD ["python", "-m", "cmcc_app.bootstrap", "healthcheck"]
 STOPSIGNAL SIGTERM
-ENTRYPOINT ["python", "-m", "cmcc_app"]
+ENTRYPOINT ["python", "-m", "cmcc_app.bootstrap"]
 CMD ["serve"]

@@ -5,7 +5,7 @@
 
 源码仓库：[Rain520/cmcc-daily](https://github.com/Rain520/cmcc-daily)，提交后 GitHub Actions 会自动运行测试、构建镜像并执行容器冒烟测试。
 
-已发布镜像：[rain5201/cmcc-daily](https://hub.docker.com/r/rain5201/cmcc-daily)，标签 `1.1.1` / `latest`（含 Webhook 推送、网页修改管理密码与通知测试），支持 AMD64 与 ARM64。飞牛 NAS 可直接导入 `compose.fn.yaml`，设置 `CMCC_WEB_PASSWORD`（可留空，默认 `123456`）后启动，访问 `http://NAS的IP:18080`，无需上传源码或本地构建。已有部署升级只需 `docker compose pull && docker compose up -d`，账号、密码和执行记录都在数据卷中，不会丢失。
+已发布镜像：[rain5201/cmcc-daily](https://hub.docker.com/r/rain5201/cmcc-daily)，标签 `1.2.0` / `latest`，支持 AMD64 与 ARM64。本版新增自动数据目录权限初始化及 `PUID/PGID/UMASK`，保留 Webhook 推送、网页修改管理密码与通知测试。飞牛 NAS 使用完整的 `compose.fn.yaml`：修改 `source` 后导入启动，目录会自动创建并修复权限，无需手动 `chown`。旧版升级须同步更新 Compose 的 `cap_add`，详见 [飞牛部署与数据迁移](docs/FEINIU.md)。`CMCC_WEB_PASSWORD` 可留空，首次启动默认 `123456`，访问 `http://NAS的IP:18080`。已有命名卷部署须先迁移数据；之后保留绑定目录更新镜像即可保留账号、密码和执行记录。
 
 ## 可以做什么
 
@@ -110,7 +110,7 @@ JWT 会自动续期并写入数据卷；续期和 App Token 登录都失败时�
 - 「仅查询状态」不执行签到、领奖、评价或抽奖消耗；仍会建立登录会话、访问活动页和更新本地缓存。活动页访问本身可能触发服务端的进页奖励，配置的通知渠道也可能收到状态推送。
 - 当前网页没有修改秒杀参数、定时评价或自动兑换的功能；这些仍可使用原脚本命令行。
 
-Docker 命名卷 `cmcc-data` 挂载到 `/data`，实际卷名由 Compose 项目名前缀决定：
+容器统一将数据保存在 `/data`。飞牛配置 `compose.fn.yaml` 使用宿主机目录绑定挂载，`source` 默认 `/vol1/1000/CMCC/data`，其他部署需替换成 NAS 的实际路径。`compose.yaml` 和 `compose.image.yaml` 仍使用命名卷 `cmcc-data`，实际卷名由 Compose 项目名前缀决定。已有命名卷切换到绑定挂载，请先按 [迁移步骤](docs/FEINIU.md#已有命名卷迁移) 复制完整数据：
 
 ```text
 /data/
@@ -123,7 +123,9 @@ Docker 命名卷 `cmcc-data` 挂载到 `/data`，实际卷名由 Compose 项目�
   app.lock          # 防止同一个卷同时启动多个实例
 ```
 
-凭证在卷中以明文保存，文件由容器用户读写；请将数据卷及备份按密码文件保管。容器以 UID/GID `10001:10001` 运行，根文件系统只读。建议使用默认命名卷；改用宿主机目录时，需让该 UID/GID 对目录有读写权限。
+账号凭证在数据目录中以明文保存，请将目录及备份按密码文件保管。`1.2.0` 起启动程序以 root 自动修复数据目录及已有文件权限，然后切换到 `PUID:PGID` 运行网页和任务，默认 `10001:10001`。飞牛配置会自动创建不存在的宿主机目录；无需手动 `chown`。根文件系统保持只读。升级必须同步使用新版 Compose 的 `cap_add`，旧版只配置 `cap_drop: ALL` 会阻止初始化。
+
+可设置 `PUID`、`PGID` 为 NAS 的用户/用户组编号，也支持 `0:0`（应用保持 root 运行）。`UMASK` 默认 `077`，支持 `022`、`000`；密码、会话签名 JSON 及账号数据库仍仅允许所有者读写。初始化不跟随符号链接，并拒绝硬链接文件和跨文件系统子目录，避免修改数据目录外的文件；数据目录应作为专用挂载使用。
 
 更新代码后运行 `docker compose up -d --build` 即可重建。`docker compose down` 保留数据；**`docker compose down -v` 会删除数据卷**。
 备份时先 `docker compose stop cmcc`，再 `docker compose cp cmcc:/data ./backup-data`，完成后 `docker compose start cmcc`。
@@ -133,6 +135,8 @@ Docker 命名卷 `cmcc-data` 挂载到 `/data`，实际卷名由 Compose 项目�
 | 环境变量 | 默认值 | 作用 |
 | --- | --- | --- |
 | `CMCC_WEB_PASSWORD` | `123456` | 首次启动的初始管理密码，至少 6 位；之后在网页修改，重启不会覆盖 |
+| `PUID` / `PGID` | `10001` / `10001` | Docker 镜像运行用户与用户组编号，启动时自动修复数据权限；允许 `0:0` |
+| `UMASK` | `077` | 新建普通文件的八进制权限掩码，也支持 `022`、`000` |
 | `CMCC_BIND_ADDRESS` | `127.0.0.1` | Compose 宿主机监听地址 |
 | `CMCC_WEB_PORT` | `8080` | Compose 宿主机端口 |
 | `TZ` | `Asia/Shanghai` | 每日计划和上游活动判断使用的时区 |

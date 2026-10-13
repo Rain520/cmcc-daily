@@ -1,14 +1,17 @@
-# Published image: rain5201/cmcc-daily:1.1.1 (linux/amd64 and linux/arm64).
+# Published image: rain5201/cmcc-daily:1.2.0 (linux/amd64 and linux/arm64).
 # CMCC_WEB_PASSWORD in the adjacent .env file seeds the first start (default 123456,
 # change it in the web UI afterwards); CMCC_IMAGE can override the tag.
 services:
   cmcc:
-    image: ${CMCC_IMAGE:-rain5201/cmcc-daily:1.1.1}
+    image: ${CMCC_IMAGE:-rain5201/cmcc-daily:1.2.0}
     restart: unless-stopped
     init: true
     ports:
       - "${CMCC_BIND_ADDRESS:-0.0.0.0}:${CMCC_WEB_PORT:-18080}:8000"
     environment:
+      PUID: ${PUID:-10001}
+      PGID: ${PGID:-10001}
+      UMASK: ${UMASK:-077}
       # 可留空：首次启动使用默认密码 123456，登录后可在网页里修改。
       CMCC_WEB_PASSWORD: ${CMCC_WEB_PASSWORD:-123456}
       TZ: ${TZ:-Asia/Shanghai}
@@ -24,6 +27,12 @@ services:
       - no-new-privileges:true
     cap_drop:
       - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+      - SETUID
+      - SETGID
     stop_grace_period: 30s
     logging:
       driver: json-file

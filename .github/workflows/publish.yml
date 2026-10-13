@@ -17,9 +17,9 @@ on:
         default: rain5201/cmcc-daily
         type: string
       tag:
-        description: Version tag, e.g. 1.1.1
+        description: Version tag, e.g. 1.2.0
         required: true
-        default: "1.1.1"
+        default: "1.2.0"
         type: string
       publish_latest:
         description: Also update the latest tag
@@ -81,6 +81,7 @@ jobs:
       - run: pip install -r requirements.txt
       - run: python -m unittest discover -s tests -v
       - run: docker build -t cmcc-daily:test .
+      - run: docker run --rm --read-only --tmpfs /tmp -v "$PWD/tests:/tests:ro" --entrypoint python cmcc-daily:test -m unittest discover -s /tests -p test_bootstrap.py -v
       - run: python tests/container_smoke.py
 
   publish:

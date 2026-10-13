@@ -2,6 +2,23 @@
 
 验证日期：2026-10-12～2026-10-13。环境：Windows、Docker Desktop 4.94.0、Linux 容器。
 
+## 自动数据权限初始化 1.2.0（2026-10-13）
+
+- 新增 root 启动初始化，自动修复绑定目录和已有文件的所有者及所有者读写权限，再切换到 `PUID:PGID` 运行；支持 `UMASK`，账号数据库保持 `0600`。
+- AMD64 容器内 64 项单元测试全部通过；Windows 64 项测试通过（4 项 Linux/root 权限测试跳过）。ARM64 模拟容器内 6 项新增权限测试通过，覆盖路径限制、符号链接不跟随、硬链接拒绝、已有文件权限修复和配置校验。
+- 容器冒烟测试使用 Docker 管理的临时 Linux 目录作为真实 bind mount，预先将目录、`app.lock`、密码文件及缓存设为 root 所有且模式 `000`。验证自动修复、原密码保留、账号增删、修改密码、重启持久化、缓存内容保留、实际网页进程 UID/GID/UMASK、只读根文件系统、健康检查，以及默认网页进程 capabilities 清零。
+- AMD64 上默认 `10001:10001/077`、自定义 `12345:12346/022`、root `0:0/000` 三种配置通过；root 场景使用命名卷，其余使用绑定挂载。ARM64 默认配置的绑定挂载冒烟测试通过。
+- ARM64 首次冒烟测试在密码修改请求触发原 5 秒超时，启动及权限修复已成功；将 ARM64 模拟测试的 HTTP 超时设为 30 秒后复测通过。未调整应用密码散列算法或服务端超时。
+- 另验证旧版缺少 capabilities 的配置、非法 PUID、非法 UMASK、将 CMCC_DATA_DIR 指向镜像系统目录均明确失败；三份 Compose 配置均通过 Docker Compose 解析。
+- 已推送 `rain5201/cmcc-daily:1.2.0` 与 `latest`，多架构索引摘要 `sha256:3c8f61f2e8cd45e476d92d6b48612bfdd6a0968d7bb4c4d6ec7c30036908dd3c`。匿名令牌查询确认两标签摘要一致且均含 AMD64/ARM64；从仓库按摘要拉取后的 AMD64 绑定挂载冒烟测试通过。未连接用户 NAS；现有 Windows 本地实例未重建。
+
+## 飞牛绑定挂载配置（2026-10-13）
+
+- 按要求将飞牛镜像标签改为 `latest`，并设置 `pull_policy: always`。联网查询 Docker Hub 的 `latest` 多架构摘要为 `sha256:ec954c71a822d83aaffb70b140230c9699b67848d2cf80f117879768a016e308`，与此前发布的 `1.1.1` 摘要一致；仅查询远端镜像，未操作 NAS。
+- `docker compose --env-file .env.example -f compose.fn.yaml config --format json` 校验通过：`/data` 使用 `bind`，宿主机路径为 `/vol1/1000/docker/cmcc-daily/data`（部署时替换），`create_host_path` 为 `false`，已移除顶层命名卷声明。
+- 新增 `docs/FEINIU.md`，说明停止旧容器后复制完整 `/data`、设置 `10001:10001` 权限、在原项目切换挂载以及回退步骤；README 同步更新。
+- 本次仅修改部署配置和说明，未更改镜像或应用代码。未连接飞牛 NAS，未在 NAS 上执行数据迁移；现有 Windows 本地实例未重建。
+
 ## 已完成
 
 - `python -m unittest discover -s tests -v`：40 项测试，覆盖账号配置、敏感字段保留与隐藏、登录鉴权、CSRF、登录限速、每日计划、重复排队、进程超时与取消、重启恢复、JWT 持久化和上游兼容修改。

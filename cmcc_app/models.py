@@ -110,6 +110,9 @@ class Store:
         self.data_dir = data_dir
         data_dir.mkdir(parents=True, exist_ok=True)
         self.db = data_dir / "cmcc.sqlite3"
+        # Account tokens stay private even when the user chooses UMASK=000.
+        self.db.touch(mode=0o600, exist_ok=True)
+        self.db.chmod(0o600)
         with self.connect() as conn:
             conn.execute("PRAGMA journal_mode=WAL")
             conn.executescript("""

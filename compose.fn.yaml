@@ -1,21 +1,32 @@
 # 飞牛 Compose：CMCC_WEB_PASSWORD 可留空，首次启动的默认密码是 123456。
-# 登录后请在网页右上角修改；密码保存在数据卷中，更新镜像不会覆盖。
+# 登录后请在网页右上角修改；密码保存在绑定目录中，更新镜像不会覆盖。
+# source 使用你的 NAS 数据路径；目录自动创建，镜像启动时修复权限。
+# 已有命名卷先按 docs/FEINIU.md 迁移数据，再应用本配置。
+# 使用 latest；每次 Compose 部署时拉取镜像，不会在后台定时升级。
 # 升级到新版本：docker compose pull && docker compose up -d
 services:
   cmcc:
-    image: rain5201/cmcc-daily:1.1.1
+    image: rain5201/cmcc-daily:latest
+    pull_policy: always
     restart: unless-stopped
     init: true
     ports:
       - "18080:8000"
     environment:
+      PUID: "10001"         # 可改为 NAS 用户 ID；默认普通用户运行
+      PGID: "10001"         # 可改为 NAS 用户组 ID
+      UMASK: "077"          # 也支持 022、000；敏感配置文件仍仅限所有者读写
       CMCC_WEB_PASSWORD: ""   # 留空 = 使用默认密码 123456
       TZ: Asia/Shanghai
       CMCC_TASK_TIMEOUT: "3600"
       CMCC_RETENTION_DAYS: "30"
       CMCC_SECURE_COOKIE: "false"
     volumes:
-      - cmcc-data:/data
+      - type: bind
+        source: /vol1/1000/CMCC/data
+        target: /data
+        bind:
+          create_host_path: true
     read_only: true
     tmpfs:
       - /tmp:size=32m,mode=1777
@@ -23,12 +34,16 @@ services:
       - no-new-privileges:true
     cap_drop:
       - ALL
+    # 仅供启动初始化及切换用户；默认网页进程降权后不保留这些能力。
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+      - SETUID
+      - SETGID
     stop_grace_period: 30s
     logging:
       driver: json-file
       options:
         max-size: "10m"
         max-file: "3"
-
-volumes:
-  cmcc-data:

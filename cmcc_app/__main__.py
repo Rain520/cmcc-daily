@@ -7,6 +7,7 @@ from urllib.request import urlopen
 
 from .settings import Settings
 from .storage import ProcessLock
+from .bootstrap import configured_umask
 
 
 def main():
@@ -31,7 +32,7 @@ def main():
                 print("提示：首次启动的管理密码为环境变量中的值，未设置时为 123456；登录后可在网页修改。")
             return 0
         if hasattr(os, "umask"):
-            os.umask(0o077)
+            os.umask(configured_umask())
         os.environ["TZ"] = settings.timezone
         if hasattr(time, "tzset"):
             time.tzset()
