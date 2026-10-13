@@ -2,6 +2,7 @@
 
 import tempfile
 import unittest
+from html.parser import HTMLParser
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -147,34 +148,79 @@ class HistoryApiTests(unittest.TestCase):
         self.assertIsNotNone(self.store.run(run_id))
 
 
+VOID_ELEMENTS = {"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta",
+                 "param", "source", "track", "wbr"}
+
+
+class StructureParser(HTMLParser):
+    """记录每个带 id 元素的祖先 id 链，用来验证页面的嵌套结构。"""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.stack = []
+        self.paths = {}
+
+    def handle_starttag(self, tag, attrs):
+        identifier = dict(attrs).get("id")
+        if identifier:
+            self.paths[identifier] = tuple(item[1] for item in self.stack if item[1])
+        if tag not in VOID_ELEMENTS:
+            self.stack.append((tag, identifier))
+
+    def handle_endtag(self, tag):
+        if tag in VOID_ELEMENTS:
+            return
+        for index in range(len(self.stack) - 1, -1, -1):
+            if self.stack[index][0] == tag:
+                del self.stack[index:]
+                return
+        raise AssertionError(f"多余的结束标签 </{tag}>")
+
+
 class HistoryViewTests(unittest.TestCase):
-    """执行记录是独立界面，不再跟在账号总览下面。"""
+    """执行记录是独立界面，两个视图必须同级且各装各的内容。"""
 
     def setUp(self):
         root = Path(cmcc_app.__file__).resolve().parent
         self.html = (root / "templates" / "index.html").read_text(encoding="utf-8")
         self.script = (root / "static" / "app.js").read_text(encoding="utf-8")
+        self.parser = StructureParser()
+        self.parser.feed(self.html)
+        self.paths = self.parser.paths
 
-    def test_views_are_separate_and_navigable(self):
-        self.assertIn('<div id="accounts-view"', self.html)
+    def test_document_is_balanced(self):
+        leftover = [item for item in self.parser.stack if item[0] not in ("html", "body")]
+        self.assertEqual(leftover, [], "模板存在未闭合的标签")
+        for element in ("accounts-view", "history-view", "account-grid", "run-list", "filter-account"):
+            self.assertIn(element, self.paths, element)
+
+    def test_views_are_siblings(self):
+        self.assertEqual(self.paths["accounts-view"], self.paths["history-view"])
         self.assertIn('<div id="history-view" hidden>', self.html)
-        self.assertLess(self.html.index('id="accounts-view"'), self.html.index('id="history-view"'))
+
+    def test_accounts_view_holds_account_content(self):
+        for element in ("stat-accounts", "stat-enabled", "account-grid", "add-account", "empty-accounts"):
+            with self.subTest(element=element):
+                self.assertIn("accounts-view", self.paths[element])
+                self.assertNotIn("history-view", self.paths[element])
+
+    def test_history_view_holds_filters_paging_and_delete(self):
+        for element in ("run-count", "history-summary", "refresh", "filter-account", "filter-task",
+                        "filter-status", "filter-source", "filter-from", "filter-to", "filter-keyword",
+                        "filter-reset", "select-page", "selection-note", "delete-selected",
+                        "delete-filtered", "page-prev", "page-info", "page-next", "page-size",
+                        "run-list", "empty-runs"):
+            with self.subTest(element=element):
+                self.assertIn("history-view", self.paths[element])
+
+    def test_navigation_switches_between_views(self):
         for name in ("accounts", "history"):
             self.assertIn(f'data-view="{name}"', self.html)
             self.assertIn(f'id="{name}-view"', self.html)
         self.assertIn('id="breadcrumb-view"', self.html)
-        # 执行记录自己的标题栏包含计数、摘要与刷新
-        heading = self.html[self.html.index('id="history-view"'):self.html.index('<section id="history"')]
-        for element in ("run-count", "history-summary", "refresh"):
-            self.assertIn(f'id="{element}"', heading, element)
         self.assertIn("function showView", self.script)
         self.assertIn('state.view === "history"', self.script)
-
-    def test_history_view_keeps_the_history_controls(self):
-        view = self.html[self.html.index('id="history-view"'):]
-        for element in ("filter-account", "filter-keyword", "select-page", "delete-selected",
-                        "page-size", "run-list", "empty-runs"):
-            self.assertIn(f'id="{element}"', view, element)
+        self.assertIn('showView(window.location.hash.slice(1)', self.script)
 
 
 if __name__ == "__main__":

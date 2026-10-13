@@ -1,7 +1,8 @@
 "use strict";
 const $ = (selector) => document.querySelector(selector);
 const state = { csrf: "", timezone: "Asia/Shanghai", accounts: [], runs: [], editing: null, runAccount: null, logId: null, deleting: null, authenticated: false,
-  runsTotal: 0, runsPages: 1, runsPage: 1, runsPageSize: 20, runsLatest: null, runsCounts: {}, runsScanned: null, selected: new Set(), runsLoading: false };
+  runsTotal: 0, runsPages: 1, runsPage: 1, runsPageSize: 20, runsLatest: null, runsCounts: {},
+  runsScanned: null, selected: new Set(), runsLoading: false, runsLoaded: false, pendingAccounts: new Set() };
 const labels = { queued: "等待执行", running: "正在执行", success: "执行完成", failed: "执行失败", interrupted: "已停止" };
 const tasks = { sign: "每日签到", wed: "周三拼图", rate: "评价有礼", fee: "话费查询" };
 const taskOrder = ["sign", "wed", "rate", "fee"];
@@ -285,6 +286,7 @@ async function loadRuns(silent = false) {
     state.runsCounts = payload.counts || {};
     const visible = new Set(state.runs.map(run => run.id));
     for (const id of Array.from(state.selected)) if (!visible.has(id)) state.selected.delete(id);
+    state.runsLoaded = true;
     renderRuns();
     renderPager();
     renderRunSummary(payload);
@@ -315,7 +317,8 @@ async function refresh(silent = false) {
   } finally {
     refreshing = false;
   }
-  if (state.view === "history") await loadRuns(silent);
+  // 账号总览也要显示「最近执行」，首次加载取一次记录；之后只在记录页刷新列表。
+  if (state.view === "history" || !state.runsLoaded) await loadRuns(silent);
   if ($("#log-dialog").open && state.logId) await updateLog();
 }
 function syncAccountFilter(force = false) {
