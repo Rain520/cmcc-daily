@@ -3,13 +3,13 @@
 这台电脑上的 Docker Desktop 为当前用户安装，Docker 可执行文件位于：
 
 ```text
-C:\Users\R\AppData\Local\Programs\DockerDesktop\resources\bin\docker.exe
+C:\Users\<你的用户名>\AppData\Local\Programs\DockerDesktop\resources\bin\docker.exe
 ```
 
 若新开的 PowerShell 已能直接运行 `docker`，不需要设置路径。否则仅为当前终端设置：
 
 ```powershell
-$env:PATH = 'C:\Users\R\AppData\Local\Programs\DockerDesktop\resources\bin;' + $env:PATH
+$env:PATH = 'C:\Users\<你的用户名>\AppData\Local\Programs\DockerDesktop\resources\bin;' + $env:PATH
 ```
 
 启动并确认 `docker version` 同时显示 Client 和 Server：

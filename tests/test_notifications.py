@@ -38,13 +38,13 @@ class TaskTitleTests(unittest.TestCase):
         return captured
 
     def test_title_is_masked_phone_then_task(self):
-        captured = self.captured_title("13877779090", "移动评价有礼", "本周已评过（上次 10 分），无需操作\n评价币余额 0")
-        self.assertEqual(captured["title"], "138****9090 移动评价有礼")
+        captured = self.captured_title("13800000011", "移动评价有礼", "本周已评过（上次 10 分），无需操作\n评价币余额 0")
+        self.assertEqual(captured["title"], "138****0011 移动评价有礼")
         self.assertEqual(captured["detail"], "本周已评过（上次 10 分），无需操作\n评价币余额 0")
         self.assertNotIn("手机尾号", captured["detail"])
 
     def test_masking_keeps_first_three_and_last_four(self):
-        self.assertEqual(self.captured_title("18412349527", "移动签到通知", "签到成功")["title"], "184****9527 移动签到通知")
+        self.assertEqual(self.captured_title("13700000022", "移动签到通知", "签到成功")["title"], "137****0022 移动签到通知")
         self.assertEqual(masked_phone("13800001234"), "138****1234")
         self.assertEqual(masked_phone(""), "????")
         self.assertEqual(masked_phone("138-0000-1234"), "138****1234")
