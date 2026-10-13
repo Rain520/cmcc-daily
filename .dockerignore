@@ -1,0 +1,7 @@
+*
+!requirements.txt
+!cmcc_*.py
+!cmcc_app/
+!cmcc_app/**
+**/__pycache__/
+**/*.pyc

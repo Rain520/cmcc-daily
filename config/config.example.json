@@ -1,0 +1,15 @@
+{
+  "app_token": "JSESSIONID=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx; UID=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx; Comment=SessionServer-unity; Path=/;HTTPOnly; ticketID=NingBo",
+  "phone": "15100000000",
+  "province_code": "731",
+  "city_code": "0731",
+  "carrier_operator": "002",
+  "app_version_code": "12.5.2",
+  "activity_id": "1021122301",
+  "channel_id": "P00000109876",
+  "fee_session_cookie": "",
+  "serverchan_sendkey": "",
+  "bark_url": "",
+  "webhook_url": "",
+  "webhook_token": ""
+}

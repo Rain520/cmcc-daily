@@ -1,0 +1,5 @@
+Flask==3.1.2
+waitress==3.0.2
+requests==2.32.5
+cryptography==46.0.3
+tzdata==2025.2
