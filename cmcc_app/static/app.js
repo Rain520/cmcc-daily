@@ -2,7 +2,8 @@
 const $ = (selector) => document.querySelector(selector);
 const state = { csrf: "", timezone: "Asia/Shanghai", accounts: [], runs: [], editing: null, runAccount: null, logId: null, deleting: null, authenticated: false,
   runsTotal: 0, runsPages: 1, runsPage: 1, runsPageSize: 20, runsLatest: null, runsCounts: {},
-  runsScanned: null, selected: new Set(), runsLoading: false, runsLoaded: false, pendingAccounts: new Set() };
+  runsScanned: null, selected: new Set(), runsLoading: false, runsLoaded: false, pendingAccounts: new Set(),
+  accountQuery: "" };
 const labels = { queued: "等待执行", running: "正在执行", success: "执行完成", failed: "执行失败", interrupted: "已停止" };
 const tasks = { sign: "每日签到", wed: "周三拼图", rate: "评价有礼", fee: "话费查询" };
 const taskOrder = ["sign", "wed", "rate", "fee"];
@@ -152,14 +153,33 @@ function readSchedules() {
   }
   return schedules;
 }
+function accountMatches(account, query) {
+  const text = query.trim().toLowerCase();
+  if (!text) return true;
+  const phone = account.config.phone || "";
+  const haystack = `${account.name} ${phone} ${phone.slice(0, 3)}****${phone.slice(-4)}`.toLowerCase();
+  if (haystack.includes(text)) return true;
+  const digits = text.replace(/\D/g, "");
+  return Boolean(digits) && haystack.replace(/\*/g, "").includes(digits);
+}
+function visibleAccounts() {
+  return state.accounts.filter(account => accountMatches(account, state.accountQuery));
+}
 function renderAccounts() {
   const grid = $("#account-grid");
   grid.replaceChildren();
-  $("#empty-accounts").hidden = state.accounts.length > 0;
+  const matches = visibleAccounts();
+  const total = state.accounts.length;
+  const searching = Boolean(state.accountQuery.trim());
+  $("#empty-accounts").hidden = total > 0;
+  $("#no-match-accounts").hidden = !(searching && total > 0 && matches.length === 0);
+  $("#account-search-note").textContent = searching ? `匹配 ${matches.length} / 共 ${total} 个账号` : "凭证仅保存在服务端";
+  $("#account-search-clear").hidden = !searching;
+  $("#account-search").value = state.accountQuery;
   $("#stat-accounts").replaceChildren(document.createTextNode(state.accounts.length), node("small", "个"));
   $("#stat-enabled").replaceChildren(document.createTextNode(state.accounts.filter(a => a.enabled).length), node("small", "个"));
-  $("#account-count").textContent = state.accounts.length;
-  for (const account of state.accounts) {
+  $("#account-count").textContent = matches.length;
+  for (const account of matches) {
     const card = node("article", undefined, "account-card");
     const top = node("div", undefined, "account-top");
     const title = node("div", undefined, "account-title");
@@ -420,8 +440,10 @@ $("#account-form").addEventListener("submit", event => {
       name: form.elements.name.value, config, options, schedules: readSchedules(), clear_secrets: clear,
     });
     $("#account-dialog").close();
+    const added = !state.editing;
     form.reset();
     toast("账号已保存");
+    if (added && state.accountQuery) setAccountQuery("");
     await refresh();
   });
 });
@@ -683,6 +705,16 @@ $("#delete-selected").addEventListener("click", () => deleteRuns([...state.selec
 $("#delete-filtered").addEventListener("click", deleteFilteredRuns);
 $("#page-prev").addEventListener("click", () => { if (state.runsPage > 1) { state.runsPage -= 1; loadRuns(); } });
 $("#page-next").addEventListener("click", () => { if (state.runsPage < state.runsPages) { state.runsPage += 1; loadRuns(); } });
+function setAccountQuery(value) {
+  state.accountQuery = value;
+  renderAccounts();
+}
+$("#account-search").addEventListener("input", event => setAccountQuery(event.currentTarget.value));
+$("#account-search").addEventListener("keydown", event => {
+  if (event.key === "Escape") { event.preventDefault(); setAccountQuery(""); }
+});
+$("#account-search-clear").addEventListener("click", () => { setAccountQuery(""); $("#account-search").focus(); });
+$("#no-match-clear").addEventListener("click", () => { setAccountQuery(""); $("#account-search").focus(); });
 $("#add-account").addEventListener("click", () => openAccount());
 $("#empty-add").addEventListener("click", () => openAccount());
 $("#refresh").addEventListener("click", () => refresh());

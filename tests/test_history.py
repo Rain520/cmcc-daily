@@ -199,7 +199,9 @@ class HistoryViewTests(unittest.TestCase):
         self.assertIn('<div id="history-view" hidden>', self.html)
 
     def test_accounts_view_holds_account_content(self):
-        for element in ("stat-accounts", "stat-enabled", "account-grid", "add-account", "empty-accounts"):
+        for element in ("stat-accounts", "stat-enabled", "account-grid", "add-account", "empty-accounts",
+                        "account-search", "account-search-clear", "account-search-note", "no-match-accounts",
+                        "no-match-clear"):
             with self.subTest(element=element):
                 self.assertIn("accounts-view", self.paths[element])
                 self.assertNotIn("history-view", self.paths[element])
@@ -212,6 +214,22 @@ class HistoryViewTests(unittest.TestCase):
                         "run-list", "empty-runs"):
             with self.subTest(element=element):
                 self.assertIn("history-view", self.paths[element])
+
+    def test_account_search_is_wired(self):
+        """账号列表搜索：输入框、清除按钮与无匹配提示都在账号视图里。"""
+        for element in ("account-search", "account-search-clear", "no-match-accounts", "no-match-clear"):
+            with self.subTest(element=element):
+                self.assertIn("accounts-view", self.paths[element])
+                self.assertNotIn("history-view", self.paths[element])
+        self.assertIn('id="account-search" type="search"', self.html)
+        self.assertIn('#no-match-accounts"', self.script)
+        self.assertIn("function accountMatches(", self.script)
+        self.assertIn("function visibleAccounts(", self.script)
+        self.assertIn('$("#account-search").addEventListener("input"', self.script)
+        self.assertIn('["#account-search", "#account-search-clear"]'.replace('["#account-search", "#account-search-clear"]', '$("#no-match-clear").addEventListener'), self.script)
+        # 网格按过滤结果渲染，统计数字也要跟着变
+        self.assertIn("for (const account of matches)", self.script)
+        self.assertIn("$('#account-count').textContent = matches.length;".replace("'", '"'), self.script)
 
     def test_navigation_switches_between_views(self):
         for name in ("accounts", "history"):
