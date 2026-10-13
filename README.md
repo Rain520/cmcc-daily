@@ -3,6 +3,8 @@
 基于 [yupaiLy/cmcc-auto-checkin](https://github.com/yupaiLy/cmcc-auto-checkin) 改写的自托管应用。
 通过网页管理账号、安排每日签到、手动执行活动并查看日志，一条 Docker Compose 命令启动。
 
+源码仓库：[Rain520/cmcc-daily](https://github.com/Rain520/cmcc-daily)，提交后 GitHub Actions 会自动运行测试、构建镜像并执行容器冒烟测试。
+
 已发布镜像：[rain5201/cmcc-daily](https://hub.docker.com/r/rain5201/cmcc-daily)，标签 `1.1.1` / `latest`（含 Webhook 推送、网页修改管理密码与通知测试），支持 AMD64 与 ARM64。飞牛 NAS 可直接导入 `compose.fn.yaml`，设置 `CMCC_WEB_PASSWORD`（可留空，默认 `123456`）后启动，访问 `http://NAS的IP:18080`，无需上传源码或本地构建。已有部署升级只需 `docker compose pull && docker compose up -d`，账号、密码和执行记录都在数据卷中，不会丢失。
 
 ## 可以做什么
