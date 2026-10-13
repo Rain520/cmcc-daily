@@ -1,5 +1,15 @@
 # 验证记录
 
+## 1.6.5：界面确认弹窗与发布验证（2026-10-14）
+
+改动：把浏览器原生确认框全部换成页面内弹窗——账号卡片「一键执行」（与「一键执行全部」同款，逐条列出任务状态、显示「将提交 N 个任务，另有 M 个会跳过」、无可提交任务时确认按钮置灰）、手动执行里「已执行成功仍要正式重跑」的二次确认（新增 `rerun-dialog`，说明最近成功时间并提示可改勾仅查询）、替换导入备份、删除所选记录与删除筛选结果（统一走 `askConfirm`，危险操作按钮为红色）。
+
+单元测试 `python -m unittest discover -s tests -q` 共 144 项通过（4 项 Linux 专用测试在 Windows 跳过），其中模板与脚本联动测试新增校验 `run-all-dialog`、`run-all-form`、`run-all-account`、`run-all-tasks`、`run-all-hint`、`run-all-error`、`run-all-submit`、`rerun-dialog`、`rerun-message`、`rerun-warning`、`rerun-submit`、`confirm-dialog`、`confirm-message`、`confirm-submit` 以及 `openRunAll`、`renderRunAllTasks`、`runAllTaskState`、`openRerun`、`runTask`、`askConfirm`，并断言脚本里已不存在 `window.confirm` 与 `window.alert`。
+
+前端：`node --check cmcc_app/static/app.js` 通过。后端接口与 1.6.4 相同，未改动。
+
+发布：`docker buildx build --platform linux/amd64,linux/arm64 --provenance=false --sbom=false -t rain5201/cmcc-daily:1.6.5 -t rain5201/cmcc-daily:latest --push .` 推送成功，两个标签指向同一索引 `sha256:ec037d20…`（AMD64 `sha256:5c9177ca…`，ARM64 `sha256:54e80f94…`）；删除本地构建的临时标签后从 Docker Hub 重新拉取并运行容器冒烟测试（通过），本地实例重建后镜像 ID 与该索引摘要一致。
+
 ## 1.6.4：一键执行与发布验证（2026-10-14）
 
 新增：账号卡片「一键执行」（该账号全部可执行任务）与页面标题「一键执行全部」（所有账号已开启计划的任务／仅重试失败的任务）。

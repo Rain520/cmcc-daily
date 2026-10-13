@@ -1,5 +1,18 @@
 # 发布容器镜像
 
+## 1.6.5
+
+已于 2026-10-14 通过本机 Docker Desktop 发布 Docker Hub 镜像 `rain5201/cmcc-daily:1.6.5` 与 `latest`：把浏览器原生确认框全部换成页面内弹窗——账号卡片「一键执行」改为与「一键执行全部」同款面板（逐条列出可提交任务与跳过原因、无可提交任务时确认按钮置灰）、手动执行里「已执行成功仍要正式重跑」新增二次确认弹窗、替换导入备份与删除记录统一走同一个确认弹窗（危险操作按钮为红色）。前端不再出现 `window.confirm`／`window.alert`，后端接口与 1.6.4 相同。支持 `linux/amd64`、`linux/arm64`。
+
+两标签摘要：`sha256:ec037d20f3fc45e6e1e50f244a10c32b5c86321436829e07c364642c876c1be3`（AMD64 清单 `sha256:5c9177cad59c674fdb5967134692d9bb76e300d0fe7f61028f0bab517b3bf247`，ARM64 清单 `sha256:54e80f94b301ac48a4d36a959d0c3229166e6059a1911378a6ac26cbf90920bd`）。发布后从 Docker Hub 重新拉取该标签并运行容器冒烟测试（通过），本地实例当前运行的镜像 ID 与该索引摘要一致。
+
+多架构发布命令（需要能访问 Docker Hub 的代理时先设置 `HTTP_PROXY`/`HTTPS_PROXY`）：
+
+```powershell
+docker buildx build --platform linux/amd64,linux/arm64 --provenance=false --sbom=false `
+  -t rain5201/cmcc-daily:1.6.5 -t rain5201/cmcc-daily:latest --push .
+```
+
 ## 1.6.4
 
 已于 2026-10-14 通过本机 Docker Desktop 发布 Docker Hub 镜像 `rain5201/cmcc-daily:1.6.4` 与 `latest`：新增账号卡片「一键执行」（一次提交该账号下全部可执行、且未在执行或排队的任务）与页面标题「一键执行全部」（所有账号已开启计划的任务，或仅重试失败的任务）。批量提交与单个任务共用同一队列、按发起顺序串行执行，跳过的任务会在提示与执行记录中说明原因；话费查询需要先配置话费会话。支持 `linux/amd64`、`linux/arm64`。
@@ -51,7 +64,7 @@ docker buildx build --platform linux/amd64,linux/arm64 --provenance=false --sbom
 | --- | --- |
 | `registry` | `ghcr.io` 或 `docker.io` |
 | `image_name` | 小写的 `账号或组织/cmcc-daily` |
-| `tag` | 版本标签，例如 `1.6.4` |
+| `tag` | 版本标签，例如 `1.6.5` |
 | `publish_latest` | 是否同时更新 `latest` 标签 |
 
 工作流先执行 Python 测试、Linux 镜像构建和容器冒烟测试，再发布 AMD64 与 ARM64 镜像。推送后还会拉取发布的摘要并再次验证 AMD64 容器。ARM64 镜像经过交叉构建，工作流不会运行 ARM64 容器测试。
@@ -86,7 +99,7 @@ python tools/package_feiniu.py 1.6.2      # 指定标签
 
 ```dotenv
 # 发布成功后使用；设置地址本身不会创建镜像。
-CMCC_IMAGE=rain5201/cmcc-daily:1.6.4
+CMCC_IMAGE=rain5201/cmcc-daily:1.6.5
 CMCC_WEB_PASSWORD='替换成自己的初始密码（至少6位）'
 CMCC_BIND_ADDRESS=0.0.0.0
 CMCC_WEB_PORT=18080

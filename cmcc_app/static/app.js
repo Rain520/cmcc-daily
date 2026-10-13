@@ -3,7 +3,7 @@ const $ = (selector) => document.querySelector(selector);
 const state = { csrf: "", timezone: "Asia/Shanghai", accounts: [], runs: [], editing: null, runAccount: null, logId: null, deleting: null, authenticated: false,
   runsTotal: 0, runsPages: 1, runsPage: 1, runsPageSize: 20, runsLatest: null, runsCounts: {},
   runsScanned: null, selected: new Set(), runsLoading: false, runsLoaded: false, pendingAccounts: new Set(), pendingTasks: new Set(),
-  accountQuery: "", accountStatus: "" };
+  accountQuery: "", accountStatus: "", rerunTask: null };
 const labels = { queued: "等待执行", running: "正在执行", success: "执行完成", partial: "部分成功", failed: "执行失败", interrupted: "已停止" };
 const tasks = { sign: "每日签到", wed: "周三拼图", rate: "评价有礼", fee: "话费查询" };
 const taskOrder = ["sign", "wed", "rate", "fee"];
@@ -264,7 +264,7 @@ function renderAccounts() {
     if (state.pendingAccounts.has(account.id)) {
       runButton.title = "该账号已有任务在执行或排队：同一任务不能重复提交，其他任务可以继续提交并自动排队。";
     }
-    const runAllButton = button("一键执行", "button secondary", () => runAllForAccount(account));
+    const runAllButton = button("一键执行", "button secondary", () => openRunAll(account));
     runAllButton.title = "提交该账号下所有未在执行或排队的任务";
     actions.append(runButton, runAllButton, button("编辑", "button secondary", () => openAccount(account)), button("删除", "text-button delete-button", () => openDelete(account)));
     Array.from(actions.children).forEach((el, i) => { el.dataset.focusKey = `${account.id}-action-${i}`; });
@@ -461,18 +461,35 @@ function batchToast(result) {
   if (!queued) return skipped ? `没有可提交的任务，跳过 ${skipped} 个` : "没有可提交的任务";
   return `已提交 ${queued} 个任务${skipped ? `，跳过 ${skipped} 个` : ""}，可在执行记录中查看`;
 }
-async function runAllForAccount(account) {
-  const list = accountRunTasks(account);
-  const pending = list.filter(task => state.pendingTasks.has(`${account.id}:${task}`));
-  const ready = list.filter(task => !state.pendingTasks.has(`${account.id}:${task}`));
-  if (!ready.length) { toast("该账号的任务都在执行或排队中", true); return; }
-  const names = ready.map(task => tasks[task]).join("、");
-  if (!window.confirm(`立即执行「${account.name}」的 ${ready.length} 个任务？\n${names}${pending.length ? `\n（${pending.length} 个正在执行或排队，将自动跳过）` : ""}`)) return;
-  try {
-    const result = await api(`/accounts/${account.id}/run-all`, "POST", {});
-    toast(batchToast(result));
-    await refresh();
-  } catch (error) { toast(error.message, true); }
+function runAllTaskState(account, task) {
+  if (task === "fee" && !account.has_fee_session_cookie) return "missing";
+  return state.pendingTasks.has(`${account.id}:${task}`) ? "pending" : "ready";
+}
+function renderRunAllTasks(account) {
+  const container = $("#run-all-tasks");
+  container.replaceChildren();
+  let ready = 0, skipped = 0;
+  for (const task of taskOrder) {
+    const state_ = runAllTaskState(account, task);
+    const row = node("div", undefined, `run-all-item ${state_}`);
+    row.append(node("span", state_ === "ready" ? "✓" : "—", "run-all-mark"), document.createTextNode(tasks[task]));
+    if (state_ === "pending") row.append(node("span", "正在执行或排队，跳过", "run-all-note"));
+    if (state_ === "missing") row.append(node("span", "未配置话费会话，跳过", "run-all-note"));
+    container.append(row);
+    if (state_ === "ready") ready += 1; else skipped += 1;
+  }
+  $("#run-all-hint").textContent = ready
+    ? `将提交 ${ready} 个任务${skipped ? `，另有 ${skipped} 个会跳过` : ""}。提交后按发起顺序串行执行。`
+    : `该账号的任务都在执行或排队中，或缺少所需配置${skipped ? `（${skipped} 个）` : ""}。`;
+  $("#run-all-submit").disabled = ready === 0;
+}
+function openRunAll(account) {
+  state.runAllAccount = account;
+  $("#run-all-form").reset();
+  $("#run-all-error").textContent = "";
+  $("#run-all-account").textContent = `执行账号：${account.name}`;
+  renderRunAllTasks(account);
+  $("#run-all-dialog").showModal();
 }
 function batchCounts(mode) {
   let ready = 0, pending = 0;
@@ -601,6 +618,16 @@ $("#account-form").addEventListener("submit", event => {
   });
 });
 $("#run-task").addEventListener("change", syncRunDialog);
+$("#run-all-form").addEventListener("submit", event => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  submit(form, "#run-all-error", async () => {
+    const result = await api(`/accounts/${state.runAllAccount.id}/run-all`, "POST", {});
+    $("#run-all-dialog").close();
+    toast(batchToast(result));
+    await refresh();
+  });
+});
 $("#batch-run").addEventListener("click", () => {
   $("#batch-form").reset();
   $("#batch-error").textContent = "";
@@ -618,22 +645,64 @@ $("#batch-form").addEventListener("submit", event => {
     await refresh();
   });
 });
+async function runTask(task, dryRun) {
+  const result = await api(`/accounts/${state.runAccount.id}/run`, "POST", { task, dry_run: dryRun });
+  $("#run-dialog").close();
+  toast("任务已加入队列");
+  showView("history");
+  await refresh();
+  await openLog(result.run_id);
+}
+function askConfirm({ title = "请确认", message = "", confirmText = "确定", danger = false, eyebrow = "PLEASE CONFIRM" }) {
+  return new Promise(resolve => {
+    const dialog = $("#confirm-dialog");
+    const form = $("#confirm-form");
+    const submitButton = $("#confirm-submit");
+    $("#confirm-eyebrow").textContent = eyebrow;
+    $("#confirm-title").textContent = title;
+    $("#confirm-message").textContent = message;
+    submitButton.textContent = confirmText;
+    submitButton.className = danger ? "button primary danger-button" : "button primary";
+    $("#confirm-error").textContent = "";
+    const finish = answer => {
+      form.removeEventListener("submit", onSubmit);
+      dialog.removeEventListener("close", onDismiss);
+      if (dialog.open) dialog.close();
+      resolve(answer);
+    };
+    const onSubmit = event => { event.preventDefault(); finish(true); };
+    const onDismiss = () => finish(false);
+    form.addEventListener("submit", onSubmit);
+    dialog.addEventListener("close", onDismiss);
+    dialog.showModal();
+  });
+}
+function openRerun(task) {
+  const entry = runTaskEntry(state.runAccount, task);
+  state.rerunTask = task;
+  $("#rerun-message").textContent = `「${tasks[task]}」最近一次已执行成功${entry.last_at ? `（${dateText(entry.last_at)}）` : ""}。`;
+  $("#rerun-error").textContent = "";
+  $("#rerun-dialog").showModal();
+}
 $("#run-form").addEventListener("submit", event => {
   event.preventDefault();
   const form = event.currentTarget;
-  const chosen = form.elements.task.value;
-  const entry = runTaskEntry(state.runAccount, chosen);
-  if (!form.elements.dry_run.checked && chosen !== "fee" && entry.state === "success"
-      && !window.confirm(`${tasks[chosen]}已经执行成功，确定再次真实执行吗？`)) return;
-  submit(form, "#run-error", async () => {
-    const result = await api(`/accounts/${state.runAccount.id}/run`, "POST", {
-      task: form.elements.task.value, dry_run: form.elements.dry_run.checked,
-    });
-    $("#run-dialog").close();
-    toast("任务已加入队列");
-    showView("history");
-    await refresh();
-    await openLog(result.run_id);
+  const task = form.elements.task.value;
+  const dryRun = form.elements.dry_run.checked;
+  if (!dryRun && task !== "fee" && runTaskEntry(state.runAccount, task).state === "success") {
+    openRerun(task);
+    return;
+  }
+  submit(form, "#run-error", () => runTask(task, dryRun));
+});
+$("#rerun-form").addEventListener("submit", event => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  submit(form, "#rerun-error", async () => {
+    const task = state.rerunTask;
+    const dryRun = $("#run-dry-run").checked;
+    $("#rerun-dialog").close();
+    await runTask(task, dryRun);
   });
 });
 $("#confirm-delete").addEventListener("click", async () => {
@@ -745,7 +814,12 @@ async function importBackup() {
   const mode = $("#import-mode").value;
   if (!file) return backupReport([["请先选择备份文件。", "fail"]]);
   if (!passphrase) return backupReport([["请输入备份密码。", "fail"]]);
-  if (mode === "replace" && !window.confirm("替换导入会删除当前全部账号和执行记录，确定继续吗？")) return;
+  if (mode === "replace" && !await askConfirm({
+    title: "替换导入备份",
+    message: "替换导入会删除当前全部账号和执行记录，确定继续吗？",
+    confirmText: "替换导入",
+    danger: true,
+  })) return;
   control.dataset.label = control.dataset.label || control.textContent;
   backupBusy(control, true, "正在导入…");
   backupReport([["正在校验并导入备份…", "pending"]]);
@@ -823,7 +897,7 @@ function applyFilters() {
 async function deleteRuns(ids, message) {
   const targets = (ids || []).filter(Boolean);
   if (!targets.length) return;
-  if (!window.confirm(message)) return;
+  if (!await askConfirm({ title: "删除执行记录", message, confirmText: "删除", danger: true })) return;
   try {
     const result = await api("/runs/delete", "POST", { ids: targets });
     if (state.logId && targets.includes(state.logId)) $("#log-dialog").close();
@@ -838,7 +912,12 @@ async function deleteRuns(ids, message) {
 }
 async function deleteFilteredRuns() {
   if (!state.runsTotal) { toast("当前筛选没有可删除的记录", true); return; }
-  if (!window.confirm(`删除当前筛选条件下的 ${state.runsTotal} 条记录？排队或运行中的记录会保留。`)) return;
+  if (!await askConfirm({
+    title: "删除筛选结果",
+    message: `删除当前筛选条件下的 ${state.runsTotal} 条记录？排队或运行中的记录会保留。`,
+    confirmText: "删除",
+    danger: true,
+  })) return;
   try {
     const result = await api("/runs/delete", "POST", { scope: "filtered", filters: currentFilters() });
     state.selected.clear();

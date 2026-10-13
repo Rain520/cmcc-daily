@@ -40,3 +40,12 @@ button.task-status{cursor:pointer}button.task-status:hover{filter:brightness(.95
 .batch-options{margin-bottom:14px}.batch-options .checkbox{margin:0 0 9px;font-size:12px}.batch-options .checkbox:last-child{margin-bottom:0}
 #batch-hint{margin:0}
 @media(max-width:760px){.heading-actions{gap:8px;justify-content:flex-start}.heading-actions .button{padding:9px 12px;font-size:11px}.batch-options .checkbox{font-size:11px}}
+.run-all-item{display:flex;align-items:center;gap:9px;font-size:12px;margin-bottom:9px}
+.run-all-item:last-child{margin-bottom:0}
+.run-all-mark{display:grid;place-items:center;width:16px;height:16px;border-radius:50%;background:var(--green);color:#fff;font-size:10px;flex:none;line-height:1}
+.run-all-item.pending .run-all-mark,.run-all-item.missing .run-all-mark{background:#c6d1cf}
+.run-all-item.pending,.run-all-item.missing{color:#9aa8a6}
+.run-all-note{font-size:11px;color:#a8b3b1}
+#run-all-account{font-size:12px;margin-bottom:14px}
+@media(max-width:760px){.run-all-item{font-size:11px}.run-all-note{font-size:10px}}
+@media(max-width:760px){#rerun-warning{font-size:11px}}

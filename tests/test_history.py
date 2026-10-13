@@ -285,17 +285,39 @@ class HistoryViewTests(unittest.TestCase):
         self.assertIn("for (const account of matches)", self.script)
         self.assertIn("$('#account-count').textContent = matches.length;".replace("'", '"'), self.script)
 
+    def test_confirmation_dialogs_replace_native_prompts(self):
+        """二次确认一律走页面内弹窗，不再使用浏览器原生 confirm/alert。"""
+        for element in ("confirm-dialog", "confirm-form", "confirm-eyebrow", "confirm-title",
+                        "confirm-message", "confirm-error", "confirm-submit"):
+            self.assertIn(f'id="{element}"', self.html)
+        self.assertIn("function askConfirm(", self.script)
+        self.assertIn("await askConfirm({", self.script)
+        self.assertNotIn("window.confirm", self.script)
+        self.assertNotIn("window.alert", self.script)
+        markup = self.html[self.html.index('<dialog id="confirm-dialog"'):]
+        markup = markup[:markup.index("</dialog>")]
+        for class_name in ('class="dialog small-dialog"', 'class="dialog-heading"', 'class="dialog-body"',
+                           'class="dialog-footer"', 'class="button primary"', 'class="button secondary"'):
+            self.assertIn(class_name, markup, "确认弹窗复用统一的对话框样式")
+
     def test_bulk_run_controls_are_wired(self):
         """账号卡片一键执行与页面顶部的一键执行全部。"""
         self.assertIn('id="batch-run"', self.html)
         self.assertIn("accounts-view", self.paths["batch-run"])
         for element in ("batch-dialog", "batch-form", "batch-hint", "batch-error", "batch-submit"):
             self.assertIn(f'id="{element}"', self.html)
-        self.assertIn("function runAllForAccount(", self.script)
+        for element in ("run-all-dialog", "run-all-form", "run-all-account", "run-all-tasks",
+                        "run-all-hint", "run-all-error", "run-all-submit"):
+            self.assertIn(f'id="{element}"', self.html)
+        self.assertIn("function openRunAll(", self.script)
+        self.assertIn("function renderRunAllTasks(", self.script)
+        self.assertIn("function runAllTaskState(", self.script)
+        self.assertIn("$('#run-all-form').addEventListener(\"submit\"".replace("'", '"'), self.script)
+        self.assertIn('.run-all-item{', self.style)
         self.assertIn("function batchCounts(", self.script)
         self.assertIn("function syncBatchDialog(", self.script)
         self.assertIn('api("/run-batch"', self.script)
-        self.assertIn("/accounts/${account.id}/run-all", self.script)
+        self.assertIn("/accounts/${state.runAllAccount.id}/run-all", self.script)
         self.assertIn('button("一键执行"', self.script)
         self.assertIn("has_fee_session_cookie", self.script)
         self.assertIn(".heading-actions{", self.style)
@@ -308,7 +330,10 @@ class HistoryViewTests(unittest.TestCase):
         self.assertIn("option.disabled = busy;", self.script)
         self.assertIn("state.pendingTasks.has(", self.script)
         self.assertIn("pending_tasks", self.script)
-        self.assertIn("已经执行成功，确定再次真实执行吗", self.script)
+        for element in ("rerun-dialog", "rerun-form", "rerun-message", "rerun-warning", "rerun-submit"):
+            self.assertIn(f'id="{element}"', self.html)
+        self.assertIn("function openRerun(", self.script)
+        self.assertIn("async function runTask(", self.script)
         self.assertIn('$("#run-dry-run").checked = done;', self.script)
         self.assertNotIn("runButton.disabled = pending;", self.script)
         self.assertIn(".run-hint{", self.style)
