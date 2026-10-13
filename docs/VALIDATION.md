@@ -14,6 +14,8 @@
 
 发布：`docker buildx build --platform linux/amd64,linux/arm64 --provenance=false --sbom=false -t rain5201/cmcc-daily:1.6.3 -t rain5201/cmcc-daily:latest --push .` 推送成功，两次标签指向同一索引 `sha256:0dae2534…`（AMD64 `sha256:a9340b52…`，ARM64 `sha256:72e98ed4…`）；随后对该镜像再次运行容器冒烟测试，通过。
 
+GitHub Actions：1.6.3 发布提交在 `Test and build` 工作流中通过（Linux 单元测试、镜像构建、容器内 bootstrap 测试与容器冒烟测试）。
+
 已知限制：添加 Windows 防火墙入站规则的提权请求被系统拒绝，手机能否直接访问预览取决于本机防火墙是否已放行 18081（本机自测 `192.168.0.104:18081` 返回 200，未用其他设备实测）。
 
 ## 预览实例与示例数据（2026-10-13）
