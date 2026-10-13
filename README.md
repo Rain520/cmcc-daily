@@ -7,6 +7,16 @@
 
 已发布镜像：[rain5201/cmcc-daily](https://hub.docker.com/r/rain5201/cmcc-daily)，当前标签 `1.6.2` / `latest`，支持 AMD64 与 ARM64。飞牛 NAS 使用完整的 `compose.fn.yaml`：把 `source` 改成自己的数据目录后导入启动，目录会自动创建并修复权限，无需手动 `chown`。`CMCC_WEB_PASSWORD` 可留空，首次启动默认 `123456`，访问 `http://NAS的IP:18080`。升级到新版只需 `docker compose pull && docker compose up -d`，账号、密码、任务计划和执行记录都保存在数据卷中，不会丢失。各版本改动见下方「版本记录」，部署与数据迁移细节见 [飞牛部署与数据迁移](docs/FEINIU.md)。
 
+## 界面预览
+
+宽屏使用左侧导航，手机窄屏自动切换为底部导航；截图取自示例数据，手机号中间四位在界面上已隐藏。
+
+| 账号总览 | 执行记录 |
+| --- | --- |
+| ![账号总览](docs/images/dashboard-accounts.png) | ![执行记录](docs/images/dashboard-history.png) |
+| <img src="docs/images/dashboard-accounts-mobile.jpg" width="260" alt="手机端账号总览"> | <img src="docs/images/dashboard-history-mobile.jpg" width="260" alt="手机端执行记录"> |
+| 手机 · 账号总览 | 手机 · 执行记录 |
+
 ## 可以做什么
 
 - **网页管理账号**：添加、编辑、删除多个账号；账号名称或手机号搜索框可即时过滤列表，支持输入 `138****0011` 这种掩码形式或手机号任意片段，并显示「匹配 N / 共 M 个账号」；已保存的 Token、Cookie 和推送密钥不回传浏览器，编辑时留空保留。

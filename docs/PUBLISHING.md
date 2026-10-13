@@ -43,6 +43,15 @@ GHCR 新包通常默认为私有，源码仓库公开并不意味着镜像公开
 
 目标镜像仓库及其公开/私有属性在 Docker Hub 中管理。不要将访问令牌发送到聊天、写进 YAML 或提交到 Git。
 
+## 生成飞牛部署包
+
+```bash
+python tools/package_feiniu.py            # 当前版本号 + latest 各打一个包
+python tools/package_feiniu.py 1.6.2      # 指定标签
+```
+
+产物为 `dist/cmcc-feiniu-<标签>.zip`，内含 `compose.yaml`、飞牛部署说明、完整 README 和 `docs/images/` 界面截图。
+
 ## 镜像发布后在飞牛部署
 
 将 `compose.image.yaml` 上传到 NAS，保存为 `compose.yaml`，并在同目录建立 `.env`：
