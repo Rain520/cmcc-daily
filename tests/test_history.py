@@ -302,7 +302,10 @@ class HistoryViewTests(unittest.TestCase):
         self.assertEqual(resolve_style(self.style, ".mobile-nav", "display", 1200), "none")
         self.assertEqual(resolve_style(self.style, ".sidebar", "display", 400), "none")
         self.assertNotEqual(resolve_style(self.style, ".sidebar", "display", 1200), "none")
-        self.assertEqual(resolve_style(self.style, ".breadcrumb", "display", 400), "none")
+        self.assertNotEqual(resolve_style(self.style, ".breadcrumb", "display", 400), "none",
+                        "1.6.0 的顶栏保持不变，面包屑不隐藏")
+        self.assertNotEqual(resolve_style(self.style, ".topbar", "justify-content", 400),
+                            "flex-end", "顶栏对齐方式沿用 1.6.0")
         self.assertEqual(resolve_style(self.style, "main", "padding-bottom", 400), "92px")
         self.assertEqual(resolve_style(self.style, ".mobile-link", "display", 400), "flex")
 
