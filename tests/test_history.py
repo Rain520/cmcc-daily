@@ -184,6 +184,7 @@ class HistoryViewTests(unittest.TestCase):
         root = Path(cmcc_app.__file__).resolve().parent
         self.html = (root / "templates" / "index.html").read_text(encoding="utf-8")
         self.script = (root / "static" / "app.js").read_text(encoding="utf-8")
+        self.style = (root / "static" / "styles.css").read_text(encoding="utf-8")
         self.parser = StructureParser()
         self.parser.feed(self.html)
         self.paths = self.parser.paths
@@ -230,6 +231,20 @@ class HistoryViewTests(unittest.TestCase):
         # 网格按过滤结果渲染，统计数字也要跟着变
         self.assertIn("for (const account of matches)", self.script)
         self.assertIn("$('#account-count').textContent = matches.length;".replace("'", '"'), self.script)
+
+    def test_mobile_navigation_replaces_the_hidden_sidebar(self):
+        """窄屏隐藏侧栏后必须仍有导航，否则手机上无法切换界面。"""
+        self.assertIn('<nav id="mobile-nav"', self.html)
+        self.assertIn("app-view", self.paths["mobile-nav"])
+        self.assertIn("mobile-link", self.html)
+        self.assertIn('document.querySelectorAll("[data-view]")', self.script)
+        self.assertIn(".mobile-nav{display:none}", self.style)
+        start = self.style.index("@media(max-width:420px)")
+        end = self.style.index("@media", start + 10)
+        narrow = self.style[start:end]
+        self.assertIn(".sidebar{display:none}", narrow, "窄屏仍然隐藏侧栏")
+        self.assertIn(".mobile-nav{display:flex", narrow, "窄屏需要显示底部导航")
+        self.assertIn("main{padding-bottom:", narrow, "底部导航不应遮挡内容")
 
     def test_navigation_switches_between_views(self):
         for name in ("accounts", "history"):

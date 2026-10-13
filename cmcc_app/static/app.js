@@ -729,12 +729,12 @@ function showView(name, updateHash = true) {
   $("#accounts-view").hidden = view !== "accounts";
   $("#history-view").hidden = view !== "history";
   $("#breadcrumb-view").textContent = viewTitles[view];
-  document.querySelectorAll(".nav-link").forEach(link => link.classList.toggle("active", link.dataset.view === view));
+  document.querySelectorAll("[data-view]").forEach(link => link.classList.toggle("active", link.dataset.view === view));
   if (updateHash && window.location.hash !== `#${view}`) window.history.replaceState(null, "", `#${view}`);
   if (view === "history" && state.authenticated) loadRuns(true);
   window.scrollTo({ top: 0, behavior: "smooth" });
 }
-document.querySelectorAll(".nav-link").forEach(link => {
+document.querySelectorAll("[data-view]").forEach(link => {
   link.addEventListener("click", event => { event.preventDefault(); showView(link.dataset.view); });
 });
 window.addEventListener("hashchange", () => showView(window.location.hash.slice(1), false));
