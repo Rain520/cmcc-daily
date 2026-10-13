@@ -304,6 +304,17 @@ class BackupUiTests(unittest.TestCase):
         self.assertIn("/api/backup/import", self.script)
         self.assertIn(".backup-section", self.style)
 
+    def test_page_pins_asset_version_and_shows_it(self):
+        """升级镜像后页面必须带版本号，避免浏览器继续用旧界面。"""
+        self.assertIn("styles.css?v={{ version }}", self.html)
+        self.assertIn("app.js?v={{ version }}", self.html)
+        self.assertNotIn("v1.1<", self.html)
+        with tempfile.TemporaryDirectory() as directory:
+            app = create_app(Settings(Path(directory), "test-password-12345"))
+            page = app.test_client().get("/").get_data(as_text=True)
+        self.assertIn(f"app.js?v={cmcc_app.__version__}", page)
+        self.assertIn(f"独立自托管 · v{cmcc_app.__version__}", page)
+
     def test_every_script_selector_matches_the_page(self):
         selectors = set(re.findall(r'\$\("#([A-Za-z0-9_-]+)"\)', self.script))
         self.assertGreater(len(selectors), 20)

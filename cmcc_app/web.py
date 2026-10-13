@@ -12,6 +12,7 @@ from functools import wraps
 from flask import Flask, Response, jsonify, render_template, request, session
 from werkzeug.exceptions import HTTPException
 
+from . import __version__
 from .auth import AuthStore
 from .backup import (MAX_FILE_BYTES, apply_payload, build_payload, check_passphrase,
                       decrypt_payload, encrypt_payload)
@@ -88,7 +89,8 @@ def create_app(settings, start_manager=False):
 
     @app.get("/")
     def index():
-        return render_template("index.html")
+        # 资源地址带版本号：升级镜像后浏览器一定拿到新的页面与静态文件。
+        return render_template("index.html", version=__version__)
 
     @app.get("/healthz")
     def health():

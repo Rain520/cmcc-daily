@@ -6,8 +6,8 @@
   <meta name="color-scheme" content="light">
   <title>移动签到 · 控制台</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='18' fill='%230f766e'/%3E%3Cpath d='m17 33 10 10 21-23' fill='none' stroke='white' stroke-width='6'/%3E%3C/svg%3E">
-  <link rel="stylesheet" href="/static/styles.css">
-  <script src="/static/app.js" defer></script>
+  <link rel="stylesheet" href="/static/styles.css?v={{ version }}">
+  <script src="/static/app.js?v={{ version }}" defer></script>
 </head>
 <body>
   <div id="loading" class="loading">正在连接控制台…</div>
@@ -21,7 +21,7 @@
   </section>
 
   <div id="app-view" class="app-layout" hidden>
-    <aside class="sidebar"><div class="brand"><span class="brand-mark">✓</span><span>移动签到<span class="brand-sub">CMCC DAILY</span></span></div><p class="nav-label">工作空间</p><a class="nav-link active" href="#accounts"><span aria-hidden="true">▦</span> 账号总览</a><a class="nav-link" href="#history"><span aria-hidden="true">◷</span> 执行记录</a><div class="sidebar-bottom"><span class="local-dot"></span> 数据存储在当前实例<p>独立自托管 · v1.1</p></div></aside>
+    <aside class="sidebar"><div class="brand"><span class="brand-mark">✓</span><span>移动签到<span class="brand-sub">CMCC DAILY</span></span></div><p class="nav-label">工作空间</p><a class="nav-link active" href="#accounts"><span aria-hidden="true">▦</span> 账号总览</a><a class="nav-link" href="#history"><span aria-hidden="true">◷</span> 执行记录</a><div class="sidebar-bottom"><span class="local-dot"></span> 数据存储在当前实例<p>独立自托管 · v{{ version }}</p></div></aside>
     <div class="main-shell"><header class="topbar"><span class="breadcrumb">工作空间 <span>/</span> <strong>控制台</strong></span><div class="topbar-right"><span id="health" class="health">连接中</span><button id="backup" class="text-button">备份与迁移</button><button id="change-password" class="text-button">修改密码</button><button id="logout" class="text-button">退出登录</button></div></header>
       <main><div id="password-warning" class="password-warning" hidden>当前使用默认管理密码 <code>123456</code>，建议立即修改。<button id="warning-change-password" class="text-button" type="button">修改密码</button></div><section class="page-heading"><div><div class="eyebrow">DAILY CHECK-IN</div><h1>账号总览<span class="heading-dot">.</span></h1><p class="muted">把日常交给计划，把每一次结果留在这里。</p></div><button id="add-account" class="button primary"><span aria-hidden="true">＋</span> 添加账号</button></section>
         <div class="stats"><div class="stat"><span>管理账号</span><strong id="stat-accounts">0<small>个</small></strong><span class="stat-note">所有已添加账号</span></div><div class="stat"><span>已启用计划</span><strong id="stat-enabled">0<small>个</small></strong><span class="stat-note" id="timezone-label">Asia/Shanghai 时区</span></div><div class="stat"><span>最近执行</span><strong id="stat-latest" class="stat-status">暂无记录</strong><span class="stat-note" id="stat-latest-note">准备好后，开始第一次签到</span></div></div>

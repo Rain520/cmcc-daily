@@ -19,8 +19,9 @@ def main():
     image = os.environ.get("CMCC_TEST_IMAGE", "cmcc-daily:test")
     platform = ["--platform", os.environ["CMCC_TEST_PLATFORM"]] if os.environ.get("CMCC_TEST_PLATFORM") else []
     # PBKDF2 password changes are substantially slower under QEMU emulation.
+    # 备份导入等操作在负载高时会超过 5 秒，测试自身给足余量。
     http_timeout = float(os.environ.get("CMCC_TEST_HTTP_TIMEOUT",
-                         "30" if os.environ.get("CMCC_TEST_PLATFORM") == "linux/arm64" else "5"))
+                         "30" if os.environ.get("CMCC_TEST_PLATFORM") == "linux/arm64" else "20"))
     uid = os.environ.get("CMCC_TEST_UID", "10001")
     gid = os.environ.get("CMCC_TEST_GID", "10001")
     mask = os.environ.get("CMCC_TEST_UMASK", "077")
