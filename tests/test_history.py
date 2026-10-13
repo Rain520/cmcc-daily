@@ -1,5 +1,6 @@
 """执行记录的分页、筛选与删除。"""
 
+import re
 import tempfile
 import unittest
 from html.parser import HTMLParser
@@ -148,6 +149,58 @@ class HistoryApiTests(unittest.TestCase):
         self.assertIsNotNone(self.store.run(run_id))
 
 
+def _media_applies(condition, width):
+    if not condition:
+        return True
+    found = re.search(r"max-width:\s*(\d+)px", condition)
+    if found:
+        return width <= int(found.group(1))
+    found = re.search(r"min-width:\s*(\d+)px", condition)
+    return bool(found) and width >= int(found.group(1))
+
+
+def resolve_style(css, selector, prop, width):
+    """按视口宽度计算选择器最终生效的属性值（同优先级取最后一条声明）。"""
+    value = None
+    index = 0
+    pattern = re.compile(r"([^{}@]+)\{([^{}]*)\}")
+    while index < len(css):
+        if css.startswith("@media", index):
+            head_end = css.index("{", index)
+            condition = css[index + 6:head_end].strip()
+            depth, cursor = 0, head_end
+            while cursor < len(css):
+                if css[cursor] == "{":
+                    depth += 1
+                elif css[cursor] == "}":
+                    depth -= 1
+                    if depth == 0:
+                        break
+                cursor += 1
+            body = css[head_end + 1:cursor]
+            for rule_selector, declarations in pattern.findall(body):
+                if rule_selector.strip() == selector and _media_applies(condition, width):
+                    value = _declaration(declarations, prop) or value
+            index = cursor + 1
+        else:
+            match = pattern.match(css, index)
+            if match:
+                if match.group(1).strip() == selector:
+                    value = _declaration(match.group(2), prop) or value
+                index = match.end()
+            else:
+                index += 1
+    return value
+
+
+def _declaration(declarations, prop):
+    for declaration in declarations.split(";"):
+        name, _, raw = declaration.partition(":")
+        if name.strip() == prop:
+            return raw.strip()
+    return None
+
+
 VOID_ELEMENTS = {"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta",
                  "param", "source", "track", "wbr"}
 
@@ -238,13 +291,20 @@ class HistoryViewTests(unittest.TestCase):
         self.assertIn("app-view", self.paths["mobile-nav"])
         self.assertIn("mobile-link", self.html)
         self.assertIn('document.querySelectorAll("[data-view]")', self.script)
-        self.assertIn(".mobile-nav{display:none}", self.style)
-        start = self.style.index("@media(max-width:420px)")
-        end = self.style.index("@media", start + 10)
-        narrow = self.style[start:end]
-        self.assertIn(".sidebar{display:none}", narrow, "窄屏仍然隐藏侧栏")
-        self.assertIn(".mobile-nav{display:flex", narrow, "窄屏需要显示底部导航")
-        self.assertIn("main{padding-bottom:", narrow, "底部导航不应遮挡内容")
+
+    def test_mobile_styles_win_the_cascade(self):
+        """按宽度实际计算样式：基础规则必须在媒体查询之前，否则会一直覆盖它。"""
+        self.assertLess(self.style.index(".mobile-nav{display:none}"),
+                        self.style.index("@media(max-width:420px)"),
+                        "基础隐藏规则必须写在 420 断点之前")
+        self.assertEqual(resolve_style(self.style, ".mobile-nav", "display", 400), "flex")
+        self.assertEqual(resolve_style(self.style, ".mobile-nav", "display", 760), "none")
+        self.assertEqual(resolve_style(self.style, ".mobile-nav", "display", 1200), "none")
+        self.assertEqual(resolve_style(self.style, ".sidebar", "display", 400), "none")
+        self.assertNotEqual(resolve_style(self.style, ".sidebar", "display", 1200), "none")
+        self.assertEqual(resolve_style(self.style, ".breadcrumb", "display", 400), "none")
+        self.assertEqual(resolve_style(self.style, "main", "padding-bottom", 400), "92px")
+        self.assertEqual(resolve_style(self.style, ".mobile-link", "display", 400), "flex")
 
     def test_navigation_switches_between_views(self):
         for name in ("accounts", "history"):
