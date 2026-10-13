@@ -7,8 +7,48 @@ from unittest.mock import Mock, patch
 
 import requests
 
-from cmcc_sign import Config, notify, notify_channels, validate_webhook, webhook_request
+from cmcc_sign import Config, masked_phone, notify, notify_channels, notify_task, validate_webhook, webhook_request
 from cmcc_app.logging_utils import redact
+
+
+class TaskTitleTests(unittest.TestCase):
+    """任务通知标题固定为「手机号（中间四位隐藏）+ 任务名」。"""
+
+    def setUp(self):
+        env = patch.dict(os.environ, {}, clear=True)
+        env.start()
+        self.addCleanup(env.stop)
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+
+    def config(self, phone):
+        path = Path(self.temp.name) / "config.json"
+        path.write_text(json.dumps({"phone": phone, "app_token": "test-token"}), encoding="utf-8")
+        return Config(str(path))
+
+    def captured_title(self, phone, task, detail):
+        captured = {}
+
+        def fake(cfg, title, detail_text, timeout=15):
+            captured.update(title=title, detail=detail_text)
+            return []
+
+        with patch("cmcc_sign.notify_channels", fake):
+            notify_task(self.config(phone), task, detail)
+        return captured
+
+    def test_title_is_masked_phone_then_task(self):
+        captured = self.captured_title("13877779090", "移动评价有礼", "本周已评过（上次 10 分），无需操作\n评价币余额 0")
+        self.assertEqual(captured["title"], "138****9090 移动评价有礼")
+        self.assertEqual(captured["detail"], "本周已评过（上次 10 分），无需操作\n评价币余额 0")
+        self.assertNotIn("手机尾号", captured["detail"])
+
+    def test_masking_keeps_first_three_and_last_four(self):
+        self.assertEqual(self.captured_title("18412349527", "移动签到通知", "签到成功")["title"], "184****9527 移动签到通知")
+        self.assertEqual(masked_phone("13800001234"), "138****1234")
+        self.assertEqual(masked_phone(""), "????")
+        self.assertEqual(masked_phone("138-0000-1234"), "138****1234")
+        self.assertEqual(masked_phone("12345"), "12345")
 
 
 class NotificationTests(unittest.TestCase):

@@ -5,6 +5,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import cmcc_app
+
 from cmcc_app import backup
 from cmcc_app.settings import Settings
 from cmcc_app.storage import account_key
@@ -22,8 +24,10 @@ def account_body(phone="13800001234", name="我的测试账号"):
                    "webhook_token": "hook-secret", "fee_session_cookie": "session-cookie-value",
                    "province_code": "731", "city_code": "0731"},
         "options": {"claim": True, "tasks": True},
-        "enabled": True,
-        "schedule_time": "08:23",
+        "schedules": {
+            "sign": {"enabled": True, "time": "08:23", "frequency": "daily", "weekdays": []},
+            "rate": {"enabled": True, "time": "10:00", "frequency": "weekly", "weekdays": [0, 3]},
+        },
     }
 
 
@@ -178,6 +182,11 @@ class BackupApiTests(unittest.TestCase):
         for field in ("app_token", "webhook_token", "fee_session_cookie"):
             self.assertTrue(saved["config"][field])
         self.assertTrue(saved["enabled"] and saved["options"]["tasks"] and saved["schedule_time"] == "08:23")
+        # 每个任务的独立计划随备份一起迁移。
+        self.assertTrue(saved["schedules"]["sign"]["enabled"])
+        self.assertEqual(saved["schedules"]["rate"]["frequency"], "weekly")
+        self.assertEqual(saved["schedules"]["rate"]["weekdays"], [0, 3])
+        self.assertFalse(saved["schedules"]["fee"]["enabled"])
         self.assertEqual(self.instance.client.get("/api/runs").json["runs"][0]["id"], self.run_id)
         log = self.instance.client.get(f"/api/runs/{self.run_id}/log").json["log"]
         self.assertIn("签到成功", log)
@@ -277,10 +286,11 @@ class BackupUiTests(unittest.TestCase):
     """界面元素与脚本选择器必须一致，否则备份入口在浏览器里会失效。"""
 
     def setUp(self):
-        root = Path(__file__).resolve().parent.parent
-        self.html = (root / "cmcc_app" / "templates" / "index.html").read_text(encoding="utf-8")
-        self.script = (root / "cmcc_app" / "static" / "app.js").read_text(encoding="utf-8")
-        self.style = (root / "cmcc_app" / "static" / "styles.css").read_text(encoding="utf-8")
+        # 从已安装的包读取前端资源，容器内运行（测试目录挂载在别处）也能找到。
+        root = Path(cmcc_app.__file__).resolve().parent
+        self.html = (root / "templates" / "index.html").read_text(encoding="utf-8")
+        self.script = (root / "static" / "app.js").read_text(encoding="utf-8")
+        self.style = (root / "static" / "styles.css").read_text(encoding="utf-8")
 
     def test_backup_controls_exist_and_are_wired(self):
         for element in ("backup", "backup-dialog", "export-backup", "import-backup", "export-password",

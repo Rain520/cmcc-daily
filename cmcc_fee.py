@@ -43,7 +43,7 @@ import requests
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
 sys.path.insert(0, str(Path(__file__).parent))
-from cmcc_sign import Config, LegacyTLSAdapter, notify  # noqa: E402
+from cmcc_sign import Config, LegacyTLSAdapter, notify, notify_task  # noqa: E402
 
 log = logging.getLogger("cmcc_fee")
 
@@ -122,7 +122,7 @@ def run(config_path: str) -> int:
     ]
     summary = "\n".join(lines)
     log.info("\n%s", summary)
-    notify(cfg, "移动话费余额", f"{summary}\n手机尾号 {cfg.phone[-4:]}")
+    notify_task(cfg, "移动话费余额", summary)
     return 0
 
 
@@ -143,7 +143,7 @@ def main() -> int:
         log.error("查询失败: %s", e)
         try:
             cfg = Config(args.config)
-            notify(cfg, "移动话费查询异常", f"{e}\n手机尾号 {cfg.phone[-4:] if cfg.phone else '????'}")
+            notify_task(cfg, "移动话费查询异常", f"{e}")
         except Exception:
             pass
         return 1

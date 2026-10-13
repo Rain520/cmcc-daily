@@ -3,7 +3,7 @@ import os
 import tempfile
 import unittest
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -13,6 +13,7 @@ from cmcc_app.models import Store, normalize_account, public_account, next_run
 from cmcc_app.settings import Settings
 from cmcc_app.storage import ProcessLock, account_key, atomic_json
 from cmcc_app.worker import task_args
+from zoneinfo import ZoneInfo
 
 
 def account_data(phone="13800001234"):
@@ -60,7 +61,7 @@ class StoreTests(unittest.TestCase):
 
     def test_due_schedule_coalesces_missed_days_and_deduplicates(self):
         now = datetime(2026, 10, 12, 1, 0, tzinfo=timezone.utc)  # 北京 09:00
-        self.account.update(enabled=True, next_run="2026-10-09T00:23:00+00:00")
+        self.account["schedules"]["sign"].update(enabled=True, next_run="2026-10-09T00:23:00+00:00")
         self.store.save(self.account)
         self.store.schedule_due("Asia/Shanghai", now)
         self.store.schedule_due("Asia/Shanghai", now)
@@ -69,7 +70,7 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(self.store.runs()[0]["source"], "schedule")
 
     def test_edit_cannot_restore_stale_next_run(self):
-        self.account.update(enabled=True, next_run="2026-10-11T00:23:00+00:00")
+        self.account["schedules"]["sign"].update(enabled=True, next_run="2026-10-11T00:23:00+00:00")
         self.store.save(self.account)
         old = self.store.account(self.account["id"])
         self.store.schedule_due("Asia/Shanghai", datetime(2026, 10, 12, 1, 0, tzinfo=timezone.utc))
@@ -78,10 +79,65 @@ class StoreTests(unittest.TestCase):
 
     def test_schedule_while_manual_pending_does_not_queue_twice(self):
         self.store.enqueue(self.account["id"], "sign")
-        self.account.update(enabled=True, next_run="2026-10-11T00:23:00+00:00")
+        self.account["schedules"]["sign"].update(enabled=True, next_run="2026-10-11T00:23:00+00:00")
         self.store.save(self.account)
         self.store.schedule_due("Asia/Shanghai", datetime(2026, 10, 12, 1, 0, tzinfo=timezone.utc))
         self.assertEqual(len(self.store.runs()), 1)
+
+    def schedule_account(self, **schedules):
+        """按指定计划保存一个账号，用于验证任务之间互不影响。"""
+        account = normalize_account(account_data(phone="13900004321"))
+        for task, entry in schedules.items():
+            account["schedules"][task].update(entry)
+        self.store.save(account)
+        return account
+
+    def test_each_task_follows_its_own_schedule(self):
+        now = datetime(2026, 10, 12, 1, 0, tzinfo=timezone.utc)  # 北京 09:00
+        account = self.schedule_account(
+            sign={"enabled": True, "time": "08:00", "next_run": "2026-10-12T00:00:00+00:00"},
+            rate={"enabled": True, "time": "10:00", "next_run": "2026-10-12T02:00:00+00:00"})
+        self.store.schedule_due("Asia/Shanghai", now)
+        self.assertEqual([run["task"] for run in self.store.runs()], ["sign"], "评价有礼 10:00 未到，不应排队")
+        self.store.finish(self.store.runs()[0]["id"], "success", 0)
+        self.store.schedule_due("Asia/Shanghai", datetime(2026, 10, 12, 2, 0, tzinfo=timezone.utc))
+        self.assertEqual(sorted(run["task"] for run in self.store.runs()), ["rate", "sign"])
+        saved = self.store.account(account["id"])
+        self.assertEqual(saved["schedules"]["sign"]["next_run"], "2026-10-13T00:00:00+00:00")
+        self.assertEqual(saved["schedules"]["rate"]["next_run"], "2026-10-13T02:00:00+00:00")
+        self.assertFalse(saved["schedules"]["wed"]["enabled"])
+
+    def test_weekly_schedule_picks_the_selected_weekday(self):
+        now = datetime(2026, 10, 12, 1, 0, tzinfo=timezone.utc)
+        value = datetime.fromisoformat(next_run("10:00", "Asia/Shanghai", now, "weekly", [2]))
+        local = value.astimezone(ZoneInfo("Asia/Shanghai"))
+        self.assertEqual(local.weekday(), 2, "只应落在选中的星期三")
+        self.assertEqual((local.hour, local.minute), (10, 0))
+        self.assertGreater(value, now)
+        self.assertLessEqual(value - now, timedelta(days=7))
+
+    def test_due_task_waits_for_a_pending_run_instead_of_dropping(self):
+        now = datetime(2026, 10, 12, 1, 0, tzinfo=timezone.utc)
+        account = self.schedule_account(
+            rate={"enabled": True, "time": "10:00", "next_run": "2026-10-12T00:00:00+00:00"})
+        self.store.enqueue(account["id"], "sign")  # 同一账号已有任务在排队
+        self.store.schedule_due("Asia/Shanghai", now)
+        self.assertEqual([run["task"] for run in self.store.runs()], ["sign"])
+        self.assertEqual(self.store.account(account["id"])["schedules"]["rate"]["next_run"],
+                         "2026-10-12T00:00:00+00:00", "排队失败时不应推进时间")
+        self.store.finish(self.store.runs()[0]["id"], "success", 0)
+        self.store.schedule_due("Asia/Shanghai", now)
+        self.assertEqual(sorted(run["task"] for run in self.store.runs()), ["rate", "sign"])
+
+    def test_legacy_row_is_read_as_daily_sign_schedule(self):
+        with self.store.connect() as conn:
+            conn.execute("""UPDATE accounts SET schedules=NULL, enabled=1, schedule_time='07:30',
+                            next_run='2026-10-12T00:00:00+00:00' WHERE id=?""", (self.account["id"],))
+        saved = self.store.account(self.account["id"])
+        self.assertEqual(saved["schedules"]["sign"]["time"], "07:30")
+        self.assertTrue(saved["schedules"]["sign"]["enabled"])
+        self.assertEqual(saved["next_run"], "2026-10-12T00:00:00+00:00")
+        self.assertFalse(saved["schedules"]["rate"]["enabled"])
 
     def test_history_cleanup_removes_only_finished_old_logs(self):
         run_id = self.store.enqueue(self.account["id"], "sign")
@@ -127,6 +183,29 @@ class ConfigTests(unittest.TestCase):
     def test_editing_phone_rejected(self):
         with self.assertRaises(ValueError):
             normalize_account({"config": {"phone": "13900001234"}}, normalize_account(account_data()))
+
+    def test_task_schedules_are_validated_and_independent(self):
+        base = account_data()
+        with self.assertRaisesRegex(ValueError, "至少要选择一天"):
+            normalize_account({**base, "schedules": {"rate": {"enabled": True, "frequency": "weekly"}}})
+        with self.assertRaisesRegex(ValueError, "执行时间"):
+            normalize_account({**base, "schedules": {"rate": {"enabled": True, "time": "25:00"}}})
+        with self.assertRaisesRegex(ValueError, "星期取值无效"):
+            normalize_account({**base, "schedules": {"rate": {"enabled": True, "frequency": "weekly",
+                                                             "weekdays": [7]}}})
+        with self.assertRaisesRegex(ValueError, "只能是每天或每周"):
+            normalize_account({**base, "schedules": {"rate": {"enabled": True, "frequency": "monthly"}}})
+        account = normalize_account({**base, "schedules": {
+            "rate": {"enabled": True, "time": "10:00", "frequency": "weekly", "weekdays": [0, 2]},
+            "fee": {"enabled": True, "time": "09:30"},
+        }})
+        self.assertEqual(sorted(account["schedules"]), ["fee", "rate", "sign", "wed"])
+        self.assertTrue(account["schedules"]["rate"]["enabled"])
+        self.assertEqual(account["schedules"]["rate"]["weekdays"], [0, 2])
+        self.assertFalse(account["schedules"]["sign"]["enabled"])
+        self.assertTrue(account["enabled"], "有任意任务开启时账号视为自动运行")
+        self.assertIsNone(normalize_account({**base, "schedules": {
+            "rate": {"enabled": False}}})["next_run"])
 
     def test_timezone_and_midnight(self):
         now = datetime(2026, 10, 12, 15, 59, tzinfo=timezone.utc)

@@ -3,6 +3,9 @@ const $ = (selector) => document.querySelector(selector);
 const state = { csrf: "", timezone: "Asia/Shanghai", accounts: [], runs: [], editing: null, runAccount: null, logId: null, deleting: null, authenticated: false };
 const labels = { queued: "等待执行", running: "正在执行", success: "执行完成", failed: "执行失败", interrupted: "已停止" };
 const tasks = { sign: "每日签到", wed: "周三拼图", rate: "评价有礼", fee: "话费查询" };
+const taskOrder = ["sign", "wed", "rate", "fee"];
+const weekdayLabels = ["一", "二", "三", "四", "五", "六", "日"];
+const defaultSchedule = { enabled: false, time: "08:23", frequency: "daily", weekdays: [] };
 const configFields = ["phone", "app_token", "province_code", "city_code", "serverchan_sendkey", "bark_url", "webhook_url", "webhook_token", "fee_session_cookie", "activity_id", "channel_id", "app_version_code", "carrier_operator"];
 const secretFields = ["app_token", "serverchan_sendkey", "bark_url", "webhook_url", "webhook_token", "fee_session_cookie"];
 let toastTimer;
@@ -67,6 +70,85 @@ function dateText(value) {
   return new Intl.DateTimeFormat("zh-CN", { timeZone: state.timezone, month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false }).format(date);
 }
 function isPending(run) { return ["queued", "running"].includes(run.status); }
+function scheduleText(entry) {
+  if (!entry || !entry.enabled) return "未开启";
+  if (entry.frequency === "weekly") {
+    const days = (entry.weekdays || []).map(day => weekdayLabels[day]).join("/") || "三";
+    return `每周${days} ${entry.time}`;
+  }
+  return `每天 ${entry.time}`;
+}
+function accountSchedules(account) {
+  const stored = (account && account.schedules) || {};
+  return Object.fromEntries(taskOrder.map(task => [task, { ...defaultSchedule, ...(stored[task] || {}) }]));
+}
+function buildScheduleRows(account) {
+  const schedules = accountSchedules(account);
+  const container = $("#task-schedules");
+  container.replaceChildren();
+  for (const task of taskOrder) {
+    const entry = schedules[task];
+    const row = node("div", undefined, "task-schedule");
+    row.dataset.task = task;
+    const head = node("div", undefined, "task-schedule-head");
+    const toggle = node("label", undefined, "switch");
+    const enabled = node("input");
+    enabled.type = "checkbox";
+    enabled.checked = entry.enabled;
+    enabled.dataset.role = "enabled";
+    enabled.setAttribute("aria-label", `开启${tasks[task]}计划`);
+    toggle.append(enabled, node("span"));
+    head.append(node("strong", tasks[task]), toggle);
+    const fields = node("div", undefined, "task-schedule-fields");
+    const time = node("input");
+    time.type = "time";
+    time.value = entry.time;
+    time.dataset.role = "time";
+    const frequency = node("select");
+    frequency.dataset.role = "frequency";
+    for (const [value, label] of [["daily", "每天"], ["weekly", "每周"]]) {
+      const option = node("option", label);
+      option.value = value;
+      frequency.append(option);
+    }
+    frequency.value = entry.frequency;
+    fields.append(node("label", "时间"), time, node("label", "频率"), frequency);
+    const weekdays = node("div", undefined, "weekday-row");
+    weekdays.dataset.role = "weekdays";
+    weekdayLabels.forEach((label, index) => {
+      const wrapper = node("label", undefined, "checkbox");
+      const box = node("input");
+      box.type = "checkbox";
+      box.dataset.day = String(index);
+      box.checked = (entry.weekdays || []).includes(index);
+      wrapper.append(box, node("span", label));
+      weekdays.append(wrapper);
+    });
+    const sync = () => {
+      fields.hidden = !enabled.checked;
+      weekdays.hidden = !enabled.checked || frequency.value !== "weekly";
+    };
+    enabled.addEventListener("change", sync);
+    frequency.addEventListener("change", sync);
+    row.append(head, fields, weekdays);
+    container.append(row);
+    sync();
+  }
+}
+function readSchedules() {
+  const schedules = {};
+  for (const row of document.querySelectorAll(".task-schedule")) {
+    const weekdays = Array.from(row.querySelectorAll('[data-role="weekdays"] input:checked'))
+      .map(box => Number(box.dataset.day));
+    schedules[row.dataset.task] = {
+      enabled: row.querySelector('[data-role="enabled"]').checked,
+      time: row.querySelector('[data-role="time"]').value || "08:23",
+      frequency: row.querySelector('[data-role="frequency"]').value,
+      weekdays,
+    };
+  }
+  return schedules;
+}
 function renderAccounts() {
   const grid = $("#account-grid");
   grid.replaceChildren();
@@ -79,9 +161,13 @@ function renderAccounts() {
     const top = node("div", undefined, "account-top");
     const title = node("div", undefined, "account-title");
     title.append(node("h3", account.name), node("span", account.config.phone.replace(/^(\d{3})\d{4}/, "$1 **** "), "account-phone"));
-    top.append(node("span", account.name.slice(0, 1), "avatar"), title, node("span", account.enabled ? "自动签到" : "手动运行", `badge ${account.enabled ? "enabled" : ""}`));
+    top.append(node("span", account.name.slice(0, 1), "avatar"), title, node("span", account.enabled ? "自动运行" : "手动运行", `badge ${account.enabled ? "enabled" : ""}`));
     const schedule = node("div", undefined, "schedule-info");
-    schedule.append(node("span", "每日计划"), node("strong", account.enabled ? `每天 ${account.schedule_time}` : "未开启"));
+    const schedules = accountSchedules(account);
+    const planned = taskOrder.filter(task => schedules[task].enabled);
+    schedule.append(node("span", "任务计划"), node("strong", planned.length
+      ? planned.map(task => `${tasks[task]} ${scheduleText(schedules[task]).replace("每天 ", "").replace("每周", "周")}`).join(" · ")
+      : "未开启"));
     const tags = node("div", undefined, "card-tags");
     tags.append(node("span", "每日签到", "card-tag"));
     for (const [key, text] of Object.entries({ claim: "累计奖励", tasks: "AI 豆", games: "拓展活动", wed: "周三拼图" })) {
@@ -92,7 +178,7 @@ function renderAccounts() {
     const runButton = button(pending ? "任务执行中…" : "手动执行  →", "button primary", () => openRun(account));
     runButton.disabled = pending;
     actions.append(runButton, button("编辑", "button secondary", () => openAccount(account)), button("删除", "text-button delete-button", () => openDelete(account)));
-    card.append(top, schedule, node("p", account.next_run ? `下次执行 ${dateText(account.next_run)}` : "可随时手动执行，或开启每日计划", "next-time"), tags, actions);
+    card.append(top, schedule, node("p", account.next_run ? `下次执行 ${dateText(account.next_run)}` : "可随时手动执行，或按任务开启计划", "next-time"), tags, actions);
     grid.append(card);
   }
 }
@@ -108,7 +194,7 @@ function renderRuns() {
     status.append(node("span", labels[run.status] || run.status, `badge ${run.status}`));
     const detail = node("td", undefined, "align-right");
     detail.append(button("查看日志 ↗", "text-button", () => openLog(run.id)));
-    row.append(first, node("td", dateText(run.created_at)), node("td", run.source === "schedule" ? "每日计划" : "手动执行"), status, detail);
+    row.append(first, node("td", dateText(run.created_at)), node("td", run.source === "schedule" ? "计划任务" : "手动执行"), status, detail);
     list.append(row);
   }
   const latest = state.runs[0];
@@ -149,8 +235,6 @@ function openAccount(account = null) {
   $("#clear-secret-options").hidden = !account;
   if (account) {
     form.elements.name.value = account.name;
-    form.elements.schedule_time.value = account.schedule_time;
-    form.elements.enabled.checked = account.enabled;
     for (const field of configFields) if (!secretFields.includes(field)) form.elements[field].value = account.config[field] || "";
     for (const field of secretFields) form.elements[field].placeholder = account[`has_${field}`] ? "已保存；留空保留，填写则更新" : "未设置";
     for (const [key, value] of Object.entries(account.options)) form.elements[key].checked = value;
@@ -158,6 +242,7 @@ function openAccount(account = null) {
     form.elements.app_token.placeholder = "粘贴 appTokenLogin 请求体中的 token";
     for (const field of secretFields.filter(f => f !== "app_token")) form.elements[field].placeholder = "选填";
   }
+  buildScheduleRows(account);
   $("#account-dialog").showModal();
 }
 function openRun(account) {
@@ -215,8 +300,7 @@ $("#account-form").addEventListener("submit", event => {
     const options = Object.fromEntries(["claim", "tasks", "games", "wed"].map(field => [field, form.elements[field].checked]));
     const clear = ["serverchan_sendkey", "bark_url", "webhook_url", "webhook_token", "fee_session_cookie"].filter(field => form.elements[`clear_${field}`].checked);
     await api(state.editing ? `/accounts/${state.editing.id}` : "/accounts", state.editing ? "PUT" : "POST", {
-      name: form.elements.name.value, config, options, enabled: form.elements.enabled.checked,
-      schedule_time: form.elements.schedule_time.value, clear_secrets: clear,
+      name: form.elements.name.value, config, options, schedules: readSchedules(), clear_secrets: clear,
     });
     $("#account-dialog").close();
     form.reset();

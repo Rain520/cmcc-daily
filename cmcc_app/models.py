@@ -22,14 +22,126 @@ def utcnow():
     return datetime.now(timezone.utc)
 
 
-def next_run(schedule_time, timezone_name, now=None):
+TASK_ORDER = ("sign", "wed", "rate", "fee")
+SCHEDULE_FREQUENCIES = ("daily", "weekly")
+WEEKDAY_NAMES = ("周一", "周二", "周三", "周四", "周五", "周六", "周日")
+DEFAULT_SCHEDULE_TIME = "08:23"
+TIME_PATTERN = re.compile(r"(?:[01][0-9]|2[0-3]):[0-5][0-9]")
+
+
+def empty_schedule():
+    """任务默认关闭；开启后按每天固定时间执行。"""
+    return {"enabled": False, "time": DEFAULT_SCHEDULE_TIME, "frequency": "daily",
+            "weekdays": [], "next_run": None}
+
+
+def next_run(schedule_time, timezone_name="Asia/Shanghai", now=None, frequency="daily", weekdays=()):
+    """计算下一次执行时间；每周计划只在选中的星期触发。"""
     now = now or utcnow()
     local = now.astimezone(ZoneInfo(timezone_name))
     hour, minute = map(int, schedule_time.split(":"))
     target = local.replace(hour=hour, minute=minute, second=0, microsecond=0)
-    if target <= local:
+    if frequency == "weekly":
+        days = sorted({int(day) % 7 for day in weekdays}) or [target.weekday()]
+        for offset in range(8):
+            candidate = target + timedelta(days=offset)
+            if candidate.weekday() in days and candidate > local:
+                target = candidate
+                break
+    elif target <= local:
         target += timedelta(days=1)
     return target.astimezone(timezone.utc).isoformat()
+
+
+def normalize_schedule(task, raw, old=None, timezone_name="Asia/Shanghai", now=None):
+    """校验单个任务的执行计划。"""
+    if not isinstance(raw, dict):
+        raise ValueError(f"{TASKS[task]}的执行计划格式不正确")
+    enabled = raw.get("enabled", False)
+    if not isinstance(enabled, bool):
+        raise ValueError(f"{TASKS[task]}的开关必须为布尔值")
+    time_value = raw.get("time", DEFAULT_SCHEDULE_TIME)
+    if not isinstance(time_value, str) or not TIME_PATTERN.fullmatch(time_value):
+        raise ValueError("执行时间格式应为 HH:MM")
+    frequency = raw.get("frequency", "daily")
+    if frequency not in SCHEDULE_FREQUENCIES:
+        raise ValueError("执行频率只能是每天或每周")
+    weekdays = raw.get("weekdays") or []
+    if (not isinstance(weekdays, list) or len(weekdays) > 7
+            or any(not isinstance(day, int) or isinstance(day, bool) or not 0 <= day <= 6 for day in weekdays)):
+        raise ValueError("每周执行的星期取值无效")
+    weekdays = sorted(set(weekdays))
+    if frequency == "weekly" and not weekdays:
+        raise ValueError(f"{TASKS[task]}按每周执行时至少要选择一天")
+    entry = {"enabled": enabled, "time": time_value, "frequency": frequency,
+             "weekdays": weekdays, "next_run": None}
+    previous = old if isinstance(old, dict) else {}
+    if (enabled and previous.get("enabled") and previous.get("time") == time_value
+            and previous.get("frequency") == frequency
+            and list(previous.get("weekdays") or []) == weekdays):
+        # 计划定义没变时保留调度器已经推进的时间，编辑账号不会重复排队。
+        entry["next_run"] = previous.get("next_run")
+    if enabled and not entry["next_run"]:
+        entry["next_run"] = next_run(time_value, timezone_name, now, frequency, weekdays)
+    return entry
+
+
+def normalize_schedules(body, old=None, timezone_name="Asia/Shanghai", now=None):
+    """每个任务一套独立计划；兼容 1.3 及更早版本的单条每日签到计划。"""
+    previous = (old or {}).get("schedules") or {}
+    supplied = body.get("schedules")
+    if supplied is not None and not isinstance(supplied, dict):
+        raise ValueError("执行计划格式不正确")
+    legacy = supplied is None and ("enabled" in body or "schedule_time" in body)
+    schedules = {}
+    for task in TASK_ORDER:
+        if supplied is not None:
+            raw = supplied.get(task) or {"enabled": False}
+        elif legacy and task == "sign":
+            old_sign = previous.get("sign") or empty_schedule()
+            raw = {"enabled": body.get("enabled", (old or {}).get("enabled", False)),
+                   "time": body.get("schedule_time", old_sign["time"]),
+                   "frequency": old_sign["frequency"], "weekdays": old_sign["weekdays"]}
+        else:
+            raw = previous.get(task) or {"enabled": False}
+        schedules[task] = normalize_schedule(task, raw, previous.get(task), timezone_name, now)
+    return schedules
+
+
+def schedule_mirrors(schedules):
+    """旧版单计划字段（enabled/schedule_time/next_run）与任务计划保持一致。"""
+    upcoming = [datetime.fromisoformat(entry["next_run"]) for entry in schedules.values()
+                if entry["enabled"] and entry["next_run"]]
+    sign = schedules.get("sign") or empty_schedule()
+    return {"enabled": any(entry["enabled"] for entry in schedules.values()),
+            "schedule_time": sign["time"],
+            "next_run": min(upcoming).isoformat() if upcoming else None}
+
+
+def decode_schedules(raw, row=None):
+    """读取任务计划；没有任务计划列的旧记录按原来的每日签到计划还原。"""
+    try:
+        data = json.loads(raw) if raw else {}
+    except ValueError:
+        data = {}
+    data = data if isinstance(data, dict) else {}
+    schedules = {}
+    for task in TASK_ORDER:
+        entry = data.get(task)
+        if isinstance(entry, dict):
+            stored = {**empty_schedule(), **{key: entry[key] for key in empty_schedule() if key in entry}}
+            stored["enabled"] = bool(stored["enabled"])
+            stored["weekdays"] = sorted({day for day in stored.get("weekdays") or []
+                                         if isinstance(day, int) and not isinstance(day, bool)})
+            schedules[task] = stored
+        else:
+            fallback = empty_schedule()
+            if task == "sign" and row is not None:
+                fallback["enabled"] = bool(row.get("enabled"))
+                fallback["time"] = row.get("schedule_time") or DEFAULT_SCHEDULE_TIME
+                fallback["next_run"] = row.get("next_run")
+            schedules[task] = fallback
+    return schedules
 
 
 def normalize_account(body, old=None, timezone_name="Asia/Shanghai"):
@@ -75,11 +187,10 @@ def normalize_account(body, old=None, timezone_name="Asia/Shanghai"):
         validate_webhook(config["webhook_url"], config["webhook_token"])
     elif config["webhook_token"]:
         raise ValueError("填写 Webhook Token 时需要同时配置 Webhook 地址；移除渠道请一并清除 Token")
-    enabled = body.get("enabled", old.get("enabled", False))
-    if not isinstance(enabled, bool):
+    if "enabled" in body and not isinstance(body["enabled"], bool):
         raise ValueError("enabled 必须为布尔值")
-    schedule = body.get("schedule_time", old.get("schedule_time", "08:23"))
-    if not isinstance(schedule, str) or not re.fullmatch(r"(?:[01][0-9]|2[0-3]):[0-5][0-9]", schedule):
+    if "schedule_time" in body and (not isinstance(body["schedule_time"], str)
+                                    or not TIME_PATTERN.fullmatch(body["schedule_time"])):
         raise ValueError("执行时间格式应为 HH:MM")
     supplied_options = body.get("options", {})
     if not isinstance(supplied_options, dict) or set(supplied_options) - OPTION_DEFAULTS.keys():
@@ -87,14 +198,11 @@ def normalize_account(body, old=None, timezone_name="Asia/Shanghai"):
     options = {**OPTION_DEFAULTS, **old.get("options", {}), **supplied_options}
     if any(not isinstance(v, bool) for v in options.values()):
         raise ValueError("任务选项必须为布尔值")
-    scheduled = old.get("next_run")
-    if not enabled:
-        scheduled = None
-    elif not old.get("enabled") or schedule != old.get("schedule_time") or not scheduled:
-        scheduled = next_run(schedule, timezone_name)
-    return {"id": old.get("id", uuid.uuid4().hex), "name": name.strip(),
-            "config": config, "options": options, "enabled": enabled,
-            "schedule_time": schedule, "next_run": scheduled}
+    schedules = normalize_schedules(body, old, timezone_name)
+    account = {"id": old.get("id", uuid.uuid4().hex), "name": name.strip(),
+               "config": config, "options": options, "schedules": schedules}
+    account.update(schedule_mirrors(schedules))
+    return account
 
 
 def public_account(account):
@@ -119,7 +227,7 @@ class Store:
                 CREATE TABLE IF NOT EXISTS accounts (
                     id TEXT PRIMARY KEY, name TEXT NOT NULL, phone TEXT NOT NULL UNIQUE,
                     config TEXT NOT NULL, options TEXT NOT NULL, enabled INTEGER NOT NULL,
-                    schedule_time TEXT NOT NULL, next_run TEXT
+                    schedule_time TEXT NOT NULL, next_run TEXT, schedules TEXT
                 );
                 CREATE TABLE IF NOT EXISTS runs (
                     id TEXT PRIMARY KEY, account_id TEXT NOT NULL, account_name TEXT NOT NULL,
@@ -131,6 +239,10 @@ class Store:
                     ON runs(account_id) WHERE status IN ('queued', 'running');
                 CREATE INDEX IF NOT EXISTS runs_created ON runs(created_at DESC);
             """)
+            # 1.3 及更早版本只有一条每日签到计划，旧记录按原有列还原。
+            columns = {row["name"] for row in conn.execute("PRAGMA table_info(accounts)")}
+            if "schedules" not in columns:
+                conn.execute("ALTER TABLE accounts ADD COLUMN schedules TEXT")
 
     @contextmanager
     def connect(self):
@@ -146,11 +258,15 @@ class Store:
     def decode(row):
         if row is None:
             return None
-        value = dict(row)
+        raw = dict(row)
+        value = dict(raw)
         value.pop("phone", None)
         # 合并默认值：升级前保存的账号可能缺少后加入的字段（如 webhook_url）。
         value["config"] = {**CONFIG_DEFAULTS, **json.loads(value["config"])}
         value["options"] = {**OPTION_DEFAULTS, **json.loads(value["options"])}
+        value["schedules"] = decode_schedules(value.pop("schedules", None), raw)
+        # enabled/schedule_time/next_run 是旧版字段，始终按任务计划重新计算。
+        value.update(schedule_mirrors(value["schedules"]))
         value["enabled"] = bool(value["enabled"])
         return value
 
@@ -165,20 +281,32 @@ class Store:
     def save(self, account):
         with self.connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            current = conn.execute("SELECT enabled,schedule_time,next_run FROM accounts WHERE id=?",
-                                   (account["id"],)).fetchone()
-            if (current and current["enabled"] and account["enabled"]
-                    and current["schedule_time"] == account["schedule_time"]):
-                # 编辑配置时保留调度器在此期间已经推进的时间。
-                account["next_run"] = current["next_run"]
+            current = conn.execute("SELECT * FROM accounts WHERE id=?", (account["id"],)).fetchone()
+            schedules = {task: dict(account.get("schedules", {}).get(task) or empty_schedule())
+                         for task in TASK_ORDER}
+            if current is not None:
+                previous = decode_schedules(dict(current).get("schedules"), dict(current))
+                for task, entry in schedules.items():
+                    old = previous.get(task) or {}
+                    if (entry["enabled"] and old.get("enabled") and entry["time"] == old.get("time")
+                            and entry["frequency"] == old.get("frequency")
+                            and list(entry.get("weekdays") or []) == list(old.get("weekdays") or [])):
+                        # 计划没改时保留调度器在此期间已经推进的时间。
+                        entry["next_run"] = old.get("next_run")
+            account["schedules"] = schedules
+            account.update(schedule_mirrors(schedules))
             try:
-                conn.execute("""INSERT INTO accounts VALUES (?,?,?,?,?,?,?,?)
+                conn.execute("""INSERT INTO accounts
+                    (id,name,phone,config,options,enabled,schedule_time,next_run,schedules)
+                    VALUES (?,?,?,?,?,?,?,?,?)
                     ON CONFLICT(id) DO UPDATE SET name=excluded.name, phone=excluded.phone,
                     config=excluded.config, options=excluded.options, enabled=excluded.enabled,
-                    schedule_time=excluded.schedule_time, next_run=excluded.next_run""",
+                    schedule_time=excluded.schedule_time, next_run=excluded.next_run,
+                    schedules=excluded.schedules""",
                     (account["id"], account["name"], account["config"]["phone"],
                      json.dumps(account["config"]), json.dumps(account["options"]),
-                     account["enabled"], account["schedule_time"], account["next_run"]))
+                     account["enabled"], account["schedule_time"], account["next_run"],
+                     json.dumps(schedules, ensure_ascii=False)))
             except sqlite3.IntegrityError:
                 raise ValueError("此手机号已经存在") from None
 
@@ -213,19 +341,35 @@ class Store:
             return self.insert_run(conn, account, task, dry_run, "manual", utcnow().isoformat())
 
     def schedule_due(self, timezone_name, now=None):
+        """按每个任务自己的计划排队；同一账号同一时刻只保留一个待执行任务。"""
         now = now or utcnow()
         with self.connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            rows = conn.execute("SELECT * FROM accounts WHERE enabled=1 AND next_run<=?",
-                                (now.isoformat(),)).fetchall()
-            for row in rows:
+            for row in conn.execute("SELECT * FROM accounts").fetchall():
                 account = self.decode(row)
-                try:
-                    self.insert_run(conn, account, "sign", False, "schedule", now.isoformat())
-                except ValueError:
-                    pass  # 当前任务覆盖本次调度，不重复排队。
-                conn.execute("UPDATE accounts SET next_run=? WHERE id=?",
-                             (next_run(account["schedule_time"], timezone_name, now), account["id"]))
+                schedules = account["schedules"]
+                changed = False
+                for task in TASK_ORDER:
+                    entry = schedules[task]
+                    if not entry["enabled"]:
+                        continue
+                    scheduled = entry.get("next_run")
+                    if scheduled and datetime.fromisoformat(scheduled) > now:
+                        continue
+                    try:
+                        self.insert_run(conn, account, task, False, "schedule", now.isoformat())
+                    except ValueError:
+                        # 该账号还有别的任务在排队或运行：保留原定时间，下个周期补跑。
+                        continue
+                    entry["next_run"] = next_run(entry["time"], timezone_name, now,
+                                                 entry["frequency"], entry["weekdays"])
+                    changed = True
+                if changed:
+                    mirrors = schedule_mirrors(schedules)
+                    conn.execute("""UPDATE accounts SET schedules=?, enabled=?, schedule_time=?, next_run=?
+                                    WHERE id=?""",
+                                 (json.dumps(schedules, ensure_ascii=False), mirrors["enabled"],
+                                  mirrors["schedule_time"], mirrors["next_run"], account["id"]))
 
     def take_run(self):
         with self.connect() as conn:

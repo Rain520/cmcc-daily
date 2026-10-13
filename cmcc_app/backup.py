@@ -186,13 +186,17 @@ def _account_body(entry):
         if field in OPTION_DEFAULTS and not isinstance(value, bool):
             raise ValueError(f"备份中的 {field} 选项格式不正确")
     name = entry.get("name", "")
-    return {
+    body = {
         "name": name if isinstance(name, str) else "",
         "config": config,
         "options": {field: value for field, value in options.items() if field in OPTION_DEFAULTS},
         "enabled": bool(entry.get("enabled")),
         "schedule_time": entry.get("schedule_time", "08:23"),
     }
+    if isinstance(entry.get("schedules"), dict):
+        # 1.4 起每个任务有独立计划；带上它才能在换服务器后保留周计划等设置。
+        body["schedules"] = entry["schedules"]
+    return body
 
 
 def _history_row(run, account_id, account_name):

@@ -43,7 +43,7 @@ import time
 
 import requests
 
-from cmcc_sign import BASE, Config, api_headers, exchange_session, notify
+from cmcc_sign import BASE, Config, api_headers, exchange_session, notify, notify_task
 
 log = logging.getLogger("cmcc_rate")
 
@@ -178,7 +178,7 @@ def run(cfg: Config, dry_run: bool, exchange_id: str | None) -> int:
 
     summary = "\n".join(lines)
     log.info("\n%s", summary)
-    notify(cfg, "移动评价有礼", f"{summary}\n手机尾号 {cfg.phone[-4:]}")
+    notify_task(cfg, "移动评价有礼", summary)
     return 1 if failed else 0
 
 
@@ -207,8 +207,7 @@ def main() -> int:
         return run(cfg, dry_run=args.dry_run, exchange_id=args.exchange)
     except Exception as e:
         log.exception("执行失败: %s", e)
-        notify(cfg, "移动评价有礼异常",
-               f"{e}\n手机尾号 {cfg.phone[-4:] if cfg.phone else '????'}")
+        notify_task(cfg, "移动评价有礼异常", f"{e}")
         return 1
 
 

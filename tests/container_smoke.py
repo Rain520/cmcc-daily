@@ -89,12 +89,19 @@ for path in (data / 'auth.json', data / 'app.lock', data / 'cache' / 'fixture.js
                 "phone": "13800001234", "app_token": "test-never-send",
                 "webhook_url": "https://example.com/test-never-send", "webhook_token": "test-hook-token"},
             "enabled": False,
+            "schedules": {"sign": {"enabled": False, "time": "10:00"},
+                          "rate": {"enabled": False, "time": "09:00", "frequency": "weekly", "weekdays": [0]}},
         }, csrf)["account"]
         assert "app_token" not in account["config"]
         assert "webhook_url" not in account["config"]
         assert "webhook_token" not in account["config"]
         assert account["has_webhook_url"] and account["has_webhook_token"]
         assert account["next_run"] is None
+        # 每个任务的独立计划可保存与读取；关闭状态不会触发执行。
+        assert account["schedules"]["sign"]["time"] == "10:00", account["schedules"]
+        assert account["schedules"]["rate"]["frequency"] == "weekly"
+        assert account["schedules"]["rate"]["weekdays"] == [0]
+        assert account["schedules"]["fee"]["enabled"] is False
         probe = request(f"/api/accounts/{account['id']}/notify-test", "POST",
                         {"webhook_url": "http://127.0.0.1/never-send"}, csrf)
         assert probe["results"][0]["ok"] is False, "invalid webhook URL must not be sent"

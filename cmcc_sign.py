@@ -518,6 +518,19 @@ def notify_channels(cfg: Config, title: str, detail: str, timeout: int = 15):
     return results
 
 
+def masked_phone(phone: str) -> str:
+    """通知标题里的账号标识：隐藏中间四位，避免推送里出现完整号码。"""
+    digits = "".join(character for character in str(phone or "") if character.isdigit())
+    if len(digits) < 7:
+        return digits or "????"
+    return f"{digits[:3]}****{digits[-4:]}"
+
+
+def notify_task(cfg: Config, name: str, detail: str):
+    """任务通知统一标题：手机号（中间四位隐藏）+ 任务名。"""
+    notify(cfg, f"{masked_phone(getattr(cfg, 'phone', ''))} {name}", detail)
+
+
 def notify(cfg: Config, title: str, detail: str):
     for result in notify_channels(cfg, title, detail):
         if result["ok"]:
@@ -579,7 +592,7 @@ def run(cfg: Config, dry_run: bool, claim: bool = True, tasks: bool = False,
                     lines.append("今日无单日奖品（累计/连签奖励见下方领奖结果）")
         else:
             detail = f"签到失败: {code} / {status} / {msg}"
-            notify(cfg, "移动签到失败", f"{detail}\n手机尾号 {cfg.phone[-4:]}")
+            notify_task(cfg, "移动签到失败", detail)
             log.error(detail)
             return 1
 
@@ -642,7 +655,7 @@ def run(cfg: Config, dry_run: bool, claim: bool = True, tasks: bool = False,
 
     summary = "\n".join(lines)
     log.info("\n%s", summary)
-    notify(cfg, "移动签到通知", f"{summary}\n手机尾号 {cfg.phone[-4:]}")
+    notify_task(cfg, "移动签到通知", summary)
     return 0
 
 
@@ -683,7 +696,7 @@ def main() -> int:
                    tasks=args.tasks, games=args.games, wed=args.wed)
     except Exception as e:
         log.exception("执行失败: %s", e)
-        notify(cfg, "移动签到异常", f"{e}\n手机尾号 {cfg.phone[-4:] if cfg.phone else '????'}")
+        notify_task(cfg, "移动签到异常", f"{e}")
         return 1
 
 

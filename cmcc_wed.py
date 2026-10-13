@@ -47,7 +47,7 @@ from urllib.parse import urlsplit
 
 import requests
 
-from cmcc_sign import BASE, Config, api_headers, assert_safe_url, exchange_session, notify
+from cmcc_sign import BASE, Config, api_headers, assert_safe_url, exchange_session, notify, notify_task
 
 # 与抓包一致的活动页地址（pageId/channelId 为活动公开配置）
 WED_ACT_URL = ("https://wx.10086.cn/hlwyxhdhub/act-wedrecharge/1024101716"
@@ -503,11 +503,11 @@ def main() -> int:
             title = "周三充值日拼图"
         summary = "\n".join(lines)
         log.info("\n%s", summary)
-        notify(cfg, title, f"{summary}\n手机尾号 {cfg.phone[-4:]}")
+        notify_task(cfg, title, summary)
         return 0
     except Exception as e:
         log.exception("执行失败: %s", e)
-        notify(cfg, "周三充值日异常", f"{e}\n手机尾号 {cfg.phone[-4:] if cfg.phone else '????'}")
+        notify_task(cfg, "周三充值日异常", f"{e}")
         return 1
 
 

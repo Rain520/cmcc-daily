@@ -1,14 +1,14 @@
 # 发布容器镜像
 
-已于 2026-10-13 通过本机 Docker Desktop 发布 Docker Hub 镜像 `rain5201/cmcc-daily:1.3.0` 与 `latest`，新增网页端加密备份导出与导入（换服务器可直接迁移账号、凭证、计划与执行记录），保留自动数据目录权限初始化、`PUID/PGID/UMASK`、Webhook 推送、网页修改管理密码与通知测试，支持 `linux/amd64`、`linux/arm64`。
+已于 2026-10-13 通过本机 Docker Desktop 发布 Docker Hub 镜像 `rain5201/cmcc-daily:1.4.0` 与 `latest`，新增每个任务的独立计划（每天或每周指定星期、单独开关与时间）和「手机号（中间四位隐藏）+ 任务名」的通知标题，保留加密备份导出与导入、自动数据目录权限初始化、`PUID/PGID/UMASK`、Webhook 推送、网页修改管理密码与通知测试，支持 `linux/amd64`、`linux/arm64`。
 
-两标签摘要：`sha256:4f785cd260febaf3c0a633e02d8025e408da10ae0ea05099807c29d4b5705902`（AMD64 清单 `sha256:b663911bce1428c5a25404fe614e1d8f3152a6292751f398f01c0b2f908fa898`，ARM64 清单 `sha256:dac862fb601e1756e80c101b5682fd47f410a957e9ef78eca10f739cd003134f`）。更早标签仍可拉取：`1.2.0`（`sha256:3c8f61f2e8cd45e476d92d6b48612bfdd6a0968d7bb4c4d6ec7c30036908dd3c`）、`1.1.1`（`sha256:ec954c71a822d83aaffb70b140230c9699b67848d2cf80f117879768a016e308`）。
+两标签摘要：`sha256:a2c40fc2313a55bf49e7e60790f83217ea6f4d0d125670bb193e18f718413601`（AMD64 清单 `sha256:a0631fef7a63fb72c4884635045567622270d884e9d5527123803bd82f9a5da6`，ARM64 清单 `sha256:d9755ed4f263ca49f83c1579bf83e8e034b3075bb5fc100fcb3a901c95ddc2fb`）。更早标签仍可拉取：`1.3.0`（`sha256:4f785cd260febaf3c0a633e02d8025e408da10ae0ea05099807c29d4b5705902`）、`1.2.0`（`sha256:3c8f61f2e8cd45e476d92d6b48612bfdd6a0968d7bb4c4d6ec7c30036908dd3c`）。
 
 多架构发布命令（需要能访问 Docker Hub 的代理时先设置 `HTTP_PROXY`/`HTTPS_PROXY`）：
 
 ```powershell
 docker buildx build --platform linux/amd64,linux/arm64 --provenance=false --sbom=false `
-  -t rain5201/cmcc-daily:1.3.0 -t rain5201/cmcc-daily:latest --push .
+  -t rain5201/cmcc-daily:1.4.0 -t rain5201/cmcc-daily:latest --push .
 ```
 
 飞牛可直接使用完整 `compose.fn.yaml`，确认绑定目录后部署；版本标签保持 `latest`，升级只替换 Compose 与镜像即可。`1.2.0` 初始化需要配置中的 `cap_add`，不要仅给旧 YAML 更换镜像标签。以下 GitHub Actions 流程保留用于后续自动发布，不是使用现有镜像的前置条件。
@@ -23,7 +23,7 @@ docker buildx build --platform linux/amd64,linux/arm64 --provenance=false --sbom
 | --- | --- |
 | `registry` | `ghcr.io` 或 `docker.io` |
 | `image_name` | 小写的 `账号或组织/cmcc-daily` |
-| `tag` | 版本标签，例如 `1.3.0` |
+| `tag` | 版本标签，例如 `1.4.0` |
 | `publish_latest` | 是否同时更新 `latest` 标签 |
 
 工作流先执行 Python 测试、Linux 镜像构建和容器冒烟测试，再发布 AMD64 与 ARM64 镜像。推送后还会拉取发布的摘要并再次验证 AMD64 容器。ARM64 镜像经过交叉构建，工作流不会运行 ARM64 容器测试。
@@ -49,7 +49,7 @@ GHCR 新包通常默认为私有，源码仓库公开并不意味着镜像公开
 
 ```dotenv
 # 发布成功后使用；设置地址本身不会创建镜像。
-CMCC_IMAGE=rain5201/cmcc-daily:1.3.0
+CMCC_IMAGE=rain5201/cmcc-daily:1.4.0
 CMCC_WEB_PASSWORD='替换成自己的初始密码（至少6位）'
 CMCC_BIND_ADDRESS=0.0.0.0
 CMCC_WEB_PORT=18080

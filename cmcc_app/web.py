@@ -251,7 +251,7 @@ def create_app(settings, start_manager=False):
             # 只用于本次测试：表单里刚填写的值优先于已保存的值。
             if value.strip():
                 config[field] = value.strip()
-        from cmcc_sign import Config, notify_channels
+        from cmcc_sign import Config, masked_phone, notify_channels
         notification = Config(None)
         notification.serverchan_sendkey = config.get("serverchan_sendkey", "")
         notification.bark_url = config.get("bark_url", "")
@@ -259,7 +259,8 @@ def create_app(settings, start_manager=False):
         notification.webhook_token = config.get("webhook_token", "")
         detail = (f"这是一条测试通知，说明通知渠道可以正常接收。\n"
                   f"账号：{account['name']}\n时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-        results = notify_channels(notification, "移动签到 · 通知测试", detail, timeout=8)
+        results = notify_channels(notification, f"{masked_phone(config.get('phone'))} 通知测试",
+                                  detail, timeout=8)
         if not results:
             raise ValueError("请先填写至少一个通知渠道（Server酱、Bark 或 Webhook）")
         return jsonify(results=results)
