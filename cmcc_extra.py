@@ -353,7 +353,8 @@ def run_mark_tasks(s: requests.Session, referer: str, cfg, dry_run: bool) -> str
             skipped += 1
         time.sleep(random.uniform(0.2, 0.6))
     if skipped:
-        task_result.mark("partial", "skipped")
+        # 第三方 App／需要真实操作的任务本来就做不了，属于正常跳过，不算失败。
+        task_result.mark("success", "skipped")
     cost = time.monotonic() - begun
     return (f"AI豆任务 {len(todo)} 个待办，完成 {got} 个，跳过 {skipped} 个"
             f"（第三方 App/真实操作类），外部合作区 {len(ext)} 个未计入，耗时 {cost:.0f}s")

@@ -120,12 +120,11 @@ class WebTests(unittest.TestCase):
             response = self.client.post(f"/api/accounts/{account['id']}/run-all", headers=self.headers, json={})
         self.assertEqual(sorted(item["task"] for item in response.json["queued"]), ["fee", "rate", "sign", "wed"])
 
-    def test_batch_run_enabled_then_failed(self):
+    def test_batch_run_modes(self):
         account = self.add_account()
         self.assertEqual(self.client.put(f"/api/accounts/{account['id']}", headers=self.headers, json={"schedules": {
             "sign": {"enabled": True, "time": "10:00"},
             "rate": {"enabled": True, "time": "09:00", "frequency": "weekly", "weekdays": [0]}}}).status_code, 200)
-        result = {"version": 1, "state": "failed", "reason": "business", "auth": "valid", "parts": {}}
         with patch.object(self.manager, "healthy", return_value=True):
             enabled = self.client.post("/api/run-batch", headers=self.headers, json={"mode": "enabled"})
             self.assertEqual(enabled.status_code, 202)
@@ -133,13 +132,34 @@ class WebTests(unittest.TestCase):
             pending = self.client.post("/api/run-batch", headers=self.headers, json={"mode": "enabled"})
             self.assertEqual(pending.json["queued"], [])
             self.assertEqual(sorted(item["task"] for item in pending.json["skipped"]), ["rate", "sign"])
-            for run in self.store.runs():
-                self.store.finish(run["id"], "failed", 1, "执行失败", result)
-            failed = self.client.post("/api/run-batch", headers=self.headers, json={"mode": "failed"})
-            self.assertEqual(failed.status_code, 202)
-            self.assertEqual(sorted(item["task"] for item in failed.json["queued"]), ["rate", "sign"])
             self.assertEqual(self.client.post("/api/run-batch", headers=self.headers, json={"mode": "other"}).status_code, 400)
+        for run in self.store.runs():
+            self.store.finish(run["id"], "success", 0)
+        with patch.object(self.manager, "healthy", return_value=True):
+            only_pending = self.client.post("/api/run-batch", headers=self.headers, json={"mode": "pending"})
+            self.assertEqual(sorted(item["task"] for item in only_pending.json["queued"]), ["wed"],
+                             "已成功的不再提交，只补未执行过的")
+            self.store.finish(only_pending.json["queued"][0]["run_id"], "success", 0)
+            everything = self.client.post("/api/run-batch", headers=self.headers, json={"mode": "all"})
+            self.assertEqual(sorted(item["task"] for item in everything.json["queued"]), ["rate", "sign", "wed"],
+                             "全部执行包含已成功的任务")
         self.assertEqual(self.client.post("/api/run-batch", headers=self.headers, json={"mode": "enabled"}).status_code, 503)
+
+    def test_account_run_all_modes(self):
+        account = self.add_account()
+        path = f"/api/accounts/{account['id']}/run-all"
+        with patch.object(self.manager, "healthy", return_value=True):
+            first = self.client.post(path, headers=self.headers, json={"mode": "pending"})
+            self.assertEqual(sorted(item["task"] for item in first.json["queued"]), ["rate", "sign", "wed"])
+            self.assertEqual(self.client.post(path, headers=self.headers, json={"mode": "bad"}).status_code, 400)
+        for run in self.store.runs():
+            self.store.finish(run["id"], "success", 0)
+        with patch.object(self.manager, "healthy", return_value=True):
+            again = self.client.post(path, headers=self.headers, json={"mode": "pending"})
+            self.assertEqual(again.json["queued"], [], "已执行成功的不再提交")
+            self.assertEqual(len(again.json["skipped"]), 0, "已成功的任务直接不列入提交范围")
+            everything = self.client.post(path, headers=self.headers, json={"mode": "all"})
+            self.assertEqual(sorted(item["task"] for item in everything.json["queued"]), ["rate", "sign", "wed"])
 
     def test_other_tasks_queue_while_one_is_pending(self):
         account = self.add_account()

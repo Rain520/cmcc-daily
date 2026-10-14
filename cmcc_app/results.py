@@ -66,7 +66,8 @@ def finish(exit_code):
     else:
         if main["state"] == "unexecuted":
             value["parts"]["main"] = {"state": "success", "reason": "ok"}
-        bad = [p for p in value["parts"].values() if p["state"] in ("failed", "partial", "skipped")]
+        # 「skipped」是已知做不了的任务（如需要真实操作的 AI 豆任务），不算异常。
+        bad = [p for p in value["parts"].values() if p["state"] in ("failed", "partial")]
         state, reason = ("failed", main["reason"]) if main["state"] == "failed" else ("partial", "partial") if bad else ("success", main["reason"] if main["state"] == "success" else "ok")
     if value["auth"] == "invalid":
         reason = "fee_auth" if any(p["reason"] == "fee_auth" for p in value["parts"].values()) else "auth"

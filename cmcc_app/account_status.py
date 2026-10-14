@@ -140,7 +140,8 @@ def summarize(account, runs, now, auth_evidence=()):
             for key in ("claim", "tasks", "games"):
                 if account["options"].get(key):
                     part = (outcome or {}).get("parts", {}).get(key)
-                    parts.append({"key": key, "state": part["state"] if current and part and not active else "unknown" if current and latest and not active else "unexecuted",
+                    parts.append({"key": key, "code": part["reason"] if current and part and not active else "unknown",
+                                  "state": part["state"] if current and part and not active else "unknown" if current and latest and not active else "unexecuted",
                                   "detail": REASONS[part["reason"]] if current and part and not active else "详情未记录" if current and latest and not active else "待本次签到执行"})
         query = next((r for r in completed if r["task"] == task and r["dry_run"] and task != "fee"), None)
         tasks.append({"task": task, "state": state, "run_id": active["id"] if active else latest["id"] if latest else None,

@@ -155,6 +155,13 @@ class AccountStatusTests(unittest.TestCase):
         self.assertEqual(self.task("wed")["state"], "unexecuted")
         self.assertIsNotNone(self.task("wed")["query_id"])
 
+    def test_part_codes_reach_the_account_card(self):
+        self.add(result=outcome(parts={"main": {"state": "success", "reason": "ok"},
+                                      "tasks": {"state": "success", "reason": "skipped"}}))
+        sign = self.task("sign")
+        self.assertEqual(sign["state"], "success")
+        self.assertEqual([p["code"] for p in sign["parts"] if p["key"] == "tasks"], ["skipped"])
+
     def test_summary_independent_of_history_page_and_auth_required(self):
         self.add(result=outcome("partial", "partial"), state="partial")
         for i in range(25):
@@ -193,6 +200,17 @@ class StructuredResultTests(unittest.TestCase):
         self.assertEqual(report["state"], "partial")
         self.assertEqual(report["parts"]["claim"]["reason"], "network")
         self.assertNotIn("private-detail", json.dumps(report))
+
+    def test_expected_skips_are_not_treated_as_partial(self):
+        """需要真实操作而跳过的任务属于正常情况，不应把整次执行标成部分成功。"""
+        results.start("sign", {"tasks": True})
+        results.auth(True)
+        results.mark()
+        results.begin("tasks")
+        results.mark("success", "skipped")
+        report = results.finish(0)
+        self.assertEqual(report["state"], "success")
+        self.assertEqual(report["parts"]["tasks"]["reason"], "skipped")
 
     def test_query_parts_not_marked_complete(self):
         results.start("sign", {"claim": True}, True)

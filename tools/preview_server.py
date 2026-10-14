@@ -119,8 +119,15 @@ def simulate(manager, run):
         result = {"version": 1, "state": "success", "reason": "query", "auth": "valid",
                   "parts": {"main": {"state": "query", "reason": "query"}}}
     else:
-        result = {"version": 1, "state": "success", "reason": "ok", "auth": "valid",
-                  "parts": {"main": {"state": "success", "reason": "ok"}}}
+        parts = {"main": {"state": "success", "reason": "ok"}}
+        if task == "sign":
+            # 模拟真实情况：累计奖励无可领取、拓展活动正常，AI 豆里有几个任务只能在手机 App 完成。
+            parts.update({"claim": {"state": "success", "reason": "empty"},
+                          "tasks": {"state": "success", "reason": "skipped"},
+                          "games": {"state": "success", "reason": "ok"}})
+            with log_path.open("a", encoding="utf-8") as handle:
+                handle.write("[AI豆任务] 3 个待办，完成 1 个，跳过 2 个（需要真实操作，属正常）\n")
+        result = {"version": 1, "state": "success", "reason": "ok", "auth": "valid", "parts": parts}
     with log_path.open("a", encoding="utf-8") as handle:
         handle.write("模拟结果：执行完成（未访问移动接口）\n")
     manager.store.finish(run_id, "success", 0, "执行完成（审核预览模拟，未访问移动接口）", result)

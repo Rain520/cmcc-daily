@@ -49,3 +49,15 @@ button.task-status{cursor:pointer}button.task-status:hover{filter:brightness(.95
 #run-all-account{font-size:12px;margin-bottom:14px}
 @media(max-width:760px){.run-all-item{font-size:11px}.run-all-note{font-size:10px}}
 @media(max-width:760px){#rerun-warning{font-size:11px}}
+.batch-task-list{max-height:232px;overflow-y:auto;padding-right:4px}
+.batch-account{font-size:12px;font-weight:600;color:#446858;margin:11px 0 7px}
+.batch-account:first-child{margin-top:0}
+.batch-empty{font-size:12px;color:#9aa8a6}
+.run-all-item.skipped .run-all-mark{background:#c6d1cf}
+.run-all-item.skipped{color:#9aa8a6}
+.run-all-item.repeat{color:#a87323}
+.run-all-item.repeat .run-all-mark{background:#d9a13b}
+.run-all-item.problem{color:#b65b52}
+.run-all-item.problem .run-all-mark{background:#c4655c}
+.run-all-item.new .run-all-note{color:#7f8f95}
+.task-part.skipped{color:#8d9a9a;background:#f7f9f9;border-color:#e8eeec}

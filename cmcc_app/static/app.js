@@ -251,7 +251,11 @@ function renderAccounts() {
         const parts = node("div", undefined, "task-parts");
         for (const part of entry.parts) {
           const name = {claim: "累计奖励", tasks: "AI 豆", games: "拓展活动"}[part.key];
-          const tag = node("span", `${taskIcons[part.state] || "○"} ${name} · ${taskLabels[part.state] || "未执行"}`, `task-part ${part.state}`);
+          // 需要真实操作而跳过的任务属于正常情况，用中性的「部分跳过」而不是黄色告警。
+          const skipped = part.state === "success" && part.code === "skipped";
+          const partState = skipped ? "skipped" : part.state;
+          const label = skipped ? "部分跳过" : taskLabels[part.state] || "未执行";
+          const tag = node("span", `${taskIcons[partState] || "○"} ${name} · ${label}`, `task-part ${partState}`);
           tag.title = part.detail;
           parts.append(tag);
         }
@@ -461,27 +465,68 @@ function batchToast(result) {
   if (!queued) return skipped ? `没有可提交的任务，跳过 ${skipped} 个` : "没有可提交的任务";
   return `已提交 ${queued} 个任务${skipped ? `，跳过 ${skipped} 个` : ""}，可在执行记录中查看`;
 }
-function runAllTaskState(account, task) {
-  if (task === "fee" && !account.has_fee_session_cookie) return "missing";
-  return state.pendingTasks.has(`${account.id}:${task}`) ? "pending" : "ready";
+function taskMark(account, task) {
+  if (task === "fee" && !account.has_fee_session_cookie) {
+    return { skip: true, tone: "muted", label: "未配置话费会话，跳过" };
+  }
+  const entry = runTaskEntry(account, task);
+  if (state.pendingTasks.has(`${account.id}:${task}`)) {
+    return { skip: true, tone: "muted", label: entry.state === "queued" ? "排队中，跳过" : "执行中，跳过" };
+  }
+  const last = entry.last_state || null;
+  if (entry.state === "success") {
+    return { skip: false, tone: "repeat", done: true, label: "重复执行（最近一次已成功）" };
+  }
+  if (last === "failed") return { skip: false, tone: "problem", label: "上次执行失败" };
+  if (last === "partial") return { skip: false, tone: "problem", label: "上次部分成功" };
+  if (last === "interrupted") return { skip: false, tone: "problem", label: "上次被停止" };
+  if (entry.state === "missed") return { skip: false, tone: "problem", label: "本次计划未执行" };
+  if (last) return { skip: false, tone: "new", label: "上次已执行，本周期未完成" };
+  return { skip: false, tone: "new", label: entry.query_id ? "只查询过一次，尚未真正执行" : "尚未执行过" };
+}
+function planFor(account, mode) {
+  const schedules = accountSchedules(account);
+  const rows = [];
+  for (const task of taskOrder) {
+    if (mode === "enabled" && !schedules[task].enabled) continue;
+    const mark = taskMark(account, task);
+    const repeat = Boolean(mark.done) && mode === "all";
+    const run = !mark.skip && (mode === "all" || !mark.done);
+    rows.push({ task, run, tone: run ? mark.tone : "skipped",
+                label: run ? `将执行 · ${mark.label}` : mark.skip ? mark.label : "已执行成功，本次跳过" });
+  }
+  return rows;
+}
+function planCounts(rows) {
+  const running = rows.filter(row => row.run);
+  return { run: running.length, repeat: running.filter(row => row.tone === "repeat").length,
+           skip: rows.length - running.length };
+}
+function renderPlan(container, rows) {
+  for (const row of rows) {
+    const item = node("div", undefined, `run-all-item ${row.run ? row.tone : "skipped"}`);
+    item.append(node("span", row.run ? "✓" : "—", "run-all-mark"), document.createTextNode(tasks[row.task]));
+    item.append(node("span", row.label, "run-all-note"));
+    container.append(item);
+  }
+}
+function planHint(counts, tail) {
+  if (!counts.run) return `没有需要提交的任务${counts.skip ? `（${counts.skip} 个已跳过）` : ""}。`;
+  const repeat = counts.repeat ? `，其中 ${counts.repeat} 个是重复执行` : "";
+  const skip = counts.skip ? `，另有 ${counts.skip} 个会跳过` : "";
+  return `将提交 ${counts.run} 个任务${repeat}${skip}${tail}。提交后按发起顺序串行执行。`;
+}
+function runAllMode() {
+  return $("#run-all-form").elements.mode.value;
 }
 function renderRunAllTasks(account) {
   const container = $("#run-all-tasks");
+  const rows = planFor(account, runAllMode());
   container.replaceChildren();
-  let ready = 0, skipped = 0;
-  for (const task of taskOrder) {
-    const state_ = runAllTaskState(account, task);
-    const row = node("div", undefined, `run-all-item ${state_}`);
-    row.append(node("span", state_ === "ready" ? "✓" : "—", "run-all-mark"), document.createTextNode(tasks[task]));
-    if (state_ === "pending") row.append(node("span", "正在执行或排队，跳过", "run-all-note"));
-    if (state_ === "missing") row.append(node("span", "未配置话费会话，跳过", "run-all-note"));
-    container.append(row);
-    if (state_ === "ready") ready += 1; else skipped += 1;
-  }
-  $("#run-all-hint").textContent = ready
-    ? `将提交 ${ready} 个任务${skipped ? `，另有 ${skipped} 个会跳过` : ""}。提交后按发起顺序串行执行。`
-    : `该账号的任务都在执行或排队中，或缺少所需配置${skipped ? `（${skipped} 个）` : ""}。`;
-  $("#run-all-submit").disabled = ready === 0;
+  renderPlan(container, rows);
+  const counts = planCounts(rows);
+  $("#run-all-hint").textContent = planHint(counts, counts.repeat ? "，重复执行会重新签到或再次消耗活动次数" : "");
+  $("#run-all-submit").disabled = counts.run === 0;
 }
 function openRunAll(account) {
   state.runAllAccount = account;
@@ -491,28 +536,30 @@ function openRunAll(account) {
   renderRunAllTasks(account);
   $("#run-all-dialog").showModal();
 }
-function batchCounts(mode) {
-  let ready = 0, pending = 0;
+function renderBatchPlan(mode) {
+  const container = $("#batch-tasks");
+  container.replaceChildren();
+  const total = { run: 0, repeat: 0, skip: 0 };
   for (const account of state.accounts) {
-    const candidates = mode === "enabled"
-      ? taskOrder.filter(task => accountSchedules(account)[task].enabled)
-      : ((account.summary && account.summary.tasks) || [])
-          .filter(entry => ["failed", "partial", "interrupted"].includes(entry.last_state))
-          .map(entry => entry.task);
-    for (const task of candidates) {
-      if (state.pendingTasks.has(`${account.id}:${task}`)) pending += 1; else ready += 1;
-    }
+    const rows = planFor(account, mode);
+    const counts = planCounts(rows);
+    if (!counts.run) continue;
+    total.run += counts.run;
+    total.repeat += counts.repeat;
+    total.skip += counts.skip;
+    container.append(node("p", account.name, "batch-account"));
+    renderPlan(container, rows);
   }
-  return { ready, pending };
+  if (!total.run) container.append(node("p", "当前没有需要提交的任务。", "batch-empty"));
+  return total;
 }
 function syncBatchDialog() {
   const mode = $("#batch-form").elements.mode.value;
-  const { ready, pending } = batchCounts(mode);
-  const tail = pending ? `，另有 ${pending} 个正在执行或排队会跳过` : "";
-  $("#batch-hint").textContent = mode === "enabled"
-    ? `将提交 ${ready} 个已开启计划的任务${tail}。提交后按发起顺序串行执行。`
-    : `将重试 ${ready} 个最近一次执行失败的任务${tail}。适合更新 App Token、话费会话或修复网络后一次性补跑。`;
-  $("#batch-submit").disabled = ready === 0;
+  const counts = renderBatchPlan(mode);
+  const tail = mode === "enabled" ? "，范围为各账号已开启计划的任务"
+    : mode === "all" ? "，包含最近已执行成功的任务" : "，已执行成功的任务本次不再执行";
+  $("#batch-hint").textContent = planHint(counts, tail);
+  $("#batch-submit").disabled = counts.run === 0;
 }
 function runTaskEntry(account, task) {
   return ((account.summary && account.summary.tasks) || []).find(entry => entry.task === task) || {};
@@ -618,11 +665,12 @@ $("#account-form").addEventListener("submit", event => {
   });
 });
 $("#run-task").addEventListener("change", syncRunDialog);
+$("#run-all-form").addEventListener("change", () => renderRunAllTasks(state.runAllAccount));
 $("#run-all-form").addEventListener("submit", event => {
   event.preventDefault();
   const form = event.currentTarget;
   submit(form, "#run-all-error", async () => {
-    const result = await api(`/accounts/${state.runAllAccount.id}/run-all`, "POST", {});
+    const result = await api(`/accounts/${state.runAllAccount.id}/run-all`, "POST", { mode: runAllMode() });
     $("#run-all-dialog").close();
     toast(batchToast(result));
     await refresh();

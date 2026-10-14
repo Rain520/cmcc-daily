@@ -24,7 +24,7 @@ COPY cmcc_*.py ./
 COPY cmcc_app/ ./cmcc_app/
 
 LABEL org.opencontainers.image.title="CMCC Daily" \
-      org.opencontainers.image.version="1.6.5" \
+      org.opencontainers.image.version="1.6.6" \
       org.opencontainers.image.description="Self-hosted CMCC check-in dashboard based on yupaiLy/cmcc-auto-checkin"
 
 # The bootstrap repairs only the data mount and drops to PUID/PGID before serving.

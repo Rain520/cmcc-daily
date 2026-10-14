@@ -16,6 +16,7 @@ from werkzeug.exceptions import HTTPException
 
 from . import __version__
 from .auth import AuthStore
+from .account_status import summaries
 from .backup import (MAX_FILE_BYTES, apply_payload, build_payload, check_passphrase,
                       decrypt_payload, encrypt_payload)
 from .logging_utils import redact
@@ -180,7 +181,6 @@ def create_app(settings, start_manager=False):
     @app.get("/api/accounts")
     @authenticated
     def accounts():
-        from .account_status import summaries
         accounts = store.accounts()
         statuses = summaries(store, accounts, settings.timezone)
         return jsonify(accounts=[{**public_account(a), "summary": statuses[a["id"]]} for a in accounts],
@@ -239,6 +239,14 @@ def create_app(settings, start_manager=False):
                                "task": task, "run_id": run_id})
         return queued, skipped
 
+    def select_tasks(account, mode, status):
+        """按弹窗里的选项挑任务：all 全部执行；pending 跳过已经执行成功的。"""
+        if mode == "all":
+            return runnable_tasks(account)
+        entries = {entry["task"]: entry for entry in (status.get(account["id"]) or {}).get("tasks", [])}
+        return [task for task in runnable_tasks(account)
+                if (entries.get(task) or {}).get("state") != "success"]
+
     def scheduler_ready():
         return None if manager.healthy() else (jsonify(error="调度器未运行，请检查容器状态"), 503)
 
@@ -249,9 +257,13 @@ def create_app(settings, start_manager=False):
         account = store.account(account_id)
         if not account:
             return jsonify(error="账号不存在"), 404
+        mode = body().get("mode", "pending")
+        if mode not in ("all", "pending"):
+            raise ValueError("一键执行方式不正确")
         if not_ready := scheduler_ready():
             return not_ready
-        queued, skipped = submit_runs(account, runnable_tasks(account))
+        status = summaries(store, [account], settings.timezone)
+        queued, skipped = submit_runs(account, select_tasks(account, mode, status))
         return jsonify(queued=queued, skipped=skipped), 202
 
     @app.post("/api/run-batch")
@@ -259,26 +271,21 @@ def create_app(settings, start_manager=False):
     def run_batch():
         """一键执行全部账号：已开启计划的任务，或仅重试失败的任务。"""
         mode = body().get("mode")
-        if mode not in ("enabled", "failed"):
+        if mode not in ("all", "pending", "enabled"):
             raise ValueError("批量执行方式不正确")
         if not_ready := scheduler_ready():
             return not_ready
+        accounts = store.accounts()
+        status = summaries(store, accounts, settings.timezone)
         queued, skipped = [], []
-        if mode == "enabled":
-            for account in store.accounts():
+        for account in accounts:
+            if mode == "enabled":
                 tasks = [task for task in TASK_ORDER if account["schedules"][task]["enabled"]]
-                part_queued, part_skipped = submit_runs(account, tasks)
-                queued += part_queued
-                skipped += part_skipped
-        else:
-            accounts = {account["id"]: account for account in store.accounts()}
-            for run in store.latest_task_runs(("failed", "partial", "interrupted")):
-                account = accounts.get(run["account_id"])
-                if account is None:
-                    continue
-                part_queued, part_skipped = submit_runs(account, [run["task"]])
-                queued += part_queued
-                skipped += part_skipped
+            else:
+                tasks = select_tasks(account, mode, status)
+            part_queued, part_skipped = submit_runs(account, tasks)
+            queued += part_queued
+            skipped += part_skipped
         return jsonify(queued=queued, skipped=skipped), 202
 
     def page_number(value, default, allowed=None):

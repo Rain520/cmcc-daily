@@ -1,5 +1,17 @@
 # 验证记录
 
+## 1.6.6：AI 豆跳过与一键执行范围选项（2026-10-14）
+
+改动：AI 豆「需要真实操作而跳过」不再让整次执行变成部分成功（`cmcc_extra` 记为 success/skipped，`results.finish` 不再把 skipped 计入异常），子步骤结果带上原因代码，界面据此把这类标签渲染成中性的「部分跳过」；一键执行新增 `pending` / `all`（批量另有 `enabled`）三种范围，服务端按账号状态挑选任务，前端按任务逐条标注状态与跳过原因。
+
+单元测试 `python -m unittest discover -s tests -q` 共 147 项通过（4 项 Linux 专用测试在 Windows 跳过），新增覆盖：跳过的步骤不再产生 partial、原因代码进入账号卡片、`run-all` 的 pending/all 两种范围（pending 跳过已成功的任务）、`run-batch` 的 enabled/pending/all（pending 只补未完成与出错的、all 包含已成功的）、`mode` 取值非法返回 400、调度器未运行时返回 503，以及模板与脚本中新增的选项、`batch-tasks`、`taskMark`、`planFor`、`renderBatchPlan` 等选择器与函数。
+
+真实运行验证（本地审核预览 0.0.0.0:18081，模拟执行不联网）：账号卡片对同一账号分别用 `mode=pending` 与 `mode=all` 提交，分别得到「只提交等待执行的任务」与「重复提交已成功的任务并跳过已在队列中的任务」；模拟执行完成后签到任务状态为 success，子步骤为 claim=empty、tasks=skipped、games=ok，界面据此显示「AI 豆 · 部分跳过」而整次仍为已完成。
+
+前端：`node --check cmcc_app/static/app.js` 通过。
+
+发布：`docker buildx build --platform linux/amd64,linux/arm64 --provenance=false --sbom=false -t rain5201/cmcc-daily:1.6.6 -t rain5201/cmcc-daily:latest --push .` 推送成功，两个标签指向同一索引 `sha256:9b3d32fb…`（AMD64 `sha256:1b1b0dd8…`，ARM64 `sha256:6a818831…`）；从 Docker Hub 拉取该标签后运行容器冒烟测试（通过），本地实例重建后镜像 ID 与该索引摘要一致。
+
 ## 1.6.5：界面确认弹窗与发布验证（2026-10-14）
 
 改动：把浏览器原生确认框全部换成页面内弹窗——账号卡片「一键执行」（与「一键执行全部」同款，逐条列出任务状态、显示「将提交 N 个任务，另有 M 个会跳过」、无可提交任务时确认按钮置灰）、手动执行里「已执行成功仍要正式重跑」的二次确认（新增 `rerun-dialog`，说明最近成功时间并提示可改勾仅查询）、替换导入备份、删除所选记录与删除筛选结果（统一走 `askConfirm`，危险操作按钮为红色）。
