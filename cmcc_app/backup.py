@@ -17,7 +17,7 @@ from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from . import __version__
-from .models import CONFIG_DEFAULTS, OPTION_DEFAULTS, normalize_account
+from .models import CONFIG_DEFAULTS, TASKS, OPTION_DEFAULTS, normalize_account
 from .storage import account_key, atomic_json
 
 FORMAT_NAME = "cmcc-backup"
@@ -203,7 +203,7 @@ def _history_row(run, account_id, account_name):
     run_id = _text(run.get("id"), 64)
     task = _text(run.get("task"), 32)
     created_at = _text(run.get("created_at"), 64)
-    if not run_id or task not in ("sign", "wed", "rate", "fee") or not created_at:
+    if not run_id or task not in TASKS or not created_at:
         return None
     if run.get("status") not in HISTORY_STATUSES:
         return None

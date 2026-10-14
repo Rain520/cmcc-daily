@@ -236,7 +236,7 @@ class ConfigTests(unittest.TestCase):
             "rate": {"enabled": True, "time": "10:00", "frequency": "weekly", "weekdays": [0, 2]},
             "fee": {"enabled": True, "time": "09:30"},
         }})
-        self.assertEqual(sorted(account["schedules"]), ["fee", "rate", "sign", "wed"])
+        self.assertEqual(sorted(account["schedules"]), ["fee", "rate", "seckill", "sign", "wed"])
         self.assertTrue(account["schedules"]["rate"]["enabled"])
         self.assertEqual(account["schedules"]["rate"]["weekdays"], [0, 2])
         self.assertFalse(account["schedules"]["sign"]["enabled"])
@@ -277,7 +277,18 @@ class ConfigTests(unittest.TestCase):
         self.assertIn("--tasks", args)
         self.assertIn("--no-claim", args)
         self.assertNotIn("--games", args)
-        self.assertEqual(task_args("fee", Path("a.json"), {}, True), ["--config", "a.json"])
+        # fee 的 dry-run 语义由网页层处理（上游脚本没有 --dry-run 参数）
+        self.assertNotIn("--dry-run", task_args("fee", Path("a.json"), {}, False))
+        self.assertIn("--dry-run", task_args("seckill", Path("a.json"), {}, True))
+        self.assertEqual(task_args("seckill", Path("a.json"), {}, False), ["--config", "a.json"])
+        # 活动卡片里的抢购参数必须传给上游脚本；缺失或非法时留给脚本用自带默认值。
+        self.assertEqual(task_args("seckill", Path("a.json"), {}, False,
+                                   {"lead": 5, "interval": 0.35, "max_attempts": 120}),
+                         ["--config", "a.json", "--lead", "5", "--interval", "0.35", "--max-attempts", "120"])
+        self.assertEqual(task_args("seckill", Path("a.json"), {}, False, {"max_attempts": "坏值"}),
+                         ["--config", "a.json"], "非法参数不能拼进命令行")
+        self.assertEqual(task_args("sign", Path("a.json"), {"claim": True}, False, {"lead": 5}),
+                         ["--config", "a.json"], "活动参数只作用于秒杀任务")
 
     def test_cache_keys_distinguish_same_phone_suffix(self):
         self.assertNotEqual(account_key("13800001234"), account_key("13900001234"))

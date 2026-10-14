@@ -169,7 +169,9 @@ class AccountStatusTests(unittest.TestCase):
         client = self.app.test_client()
         self.assertEqual(client.get("/api/accounts").status_code, 401)
         client.post("/api/login", json={"password": "preview-password"})
-        payload = client.get("/api/accounts").json
+        # 接口按真实时钟算「今天」，这里固定成用例的参考时间，避免跨过零点后计划窗口改变。
+        with patch("cmcc_app.account_status.utcnow", return_value=self.now.astimezone(timezone.utc)):
+            payload = client.get("/api/accounts").json
         account = payload["accounts"][0]
         self.assertEqual(account["summary"]["state"], "warning")
         self.assertNotIn("preview-token", json.dumps(payload))

@@ -11,6 +11,92 @@ from urllib.error import HTTPError, URLError
 from urllib.request import HTTPCookieProcessor, ProxyHandler, Request, build_opener
 
 
+def preview_case(docker, image, platform, http_timeout, suffix):
+    """CMCC_PREVIEW=1 审核预览：只用虚构数据、任务本地模拟，并拒绝真实数据目录。"""
+    name, volume, refused = f"cmcc-preview-{suffix}", f"cmcc-preview-data-{suffix}", f"cmcc-preview-real-{suffix}"
+    try:
+        docker("volume", "create", volume)
+        docker("run", *platform, "-d", "--name", name, "--init", "--read-only", "--cap-drop=ALL",
+               "--cap-add=CHOWN", "--cap-add=DAC_OVERRIDE", "--cap-add=FOWNER",
+               "--cap-add=SETUID", "--cap-add=SETGID", "--security-opt=no-new-privileges",
+               "--tmpfs", "/tmp:size=32m,mode=1777", "-p", "127.0.0.1::8000",
+               "-v", f"{volume}:/data", "-e", "CMCC_PREVIEW=1", image)
+        port = docker("port", name, "8000/tcp").split(":")[-1]
+        base = f"http://127.0.0.1:{port}"
+        client = build_opener(ProxyHandler({}), HTTPCookieProcessor(http.cookiejar.CookieJar()))
+
+        def load(path, method="GET", body=None, csrf=""):
+            req = Request(base + path, method=method,
+                          data=None if body is None else json.dumps(body).encode(),
+                          headers={"Content-Type": "application/json", "X-CSRF-Token": csrf})
+            with client.open(req, timeout=http_timeout) as response:
+                return json.load(response)
+
+        for _ in range(90):
+            try:
+                if load("/healthz")["status"] == "ok":
+                    break
+            except (URLError, HTTPError, http.client.RemoteDisconnected, ConnectionError, TimeoutError):
+                time.sleep(1)
+        else:
+            raise AssertionError("preview container did not become healthy")
+
+        csrf = load("/api/login", "POST", {"password": "123456"})["csrf"]
+        payload = load("/api/accounts")
+        assert payload["preview"] is True, payload
+        accounts = payload["accounts"]
+        assert len(accounts) == 6, accounts
+        assert {item["config"]["phone"] for item in accounts} == {
+            "13800000011", "13700000022", "13900000033",
+            "13600000044", "13500000055", "13400000066"}, accounts
+        assert all(item["name"].startswith("示例") for item in accounts), accounts
+        assert {"running", "queued"} <= {item["summary"]["state"] for item in accounts}, accounts
+        page = client.open(Request(base + "/", method="GET"), timeout=http_timeout).read().decode()
+        assert "审核预览" in page and "全部为虚构数据" in page, page[:200]
+        for path in (f"/api/accounts/{accounts[0]['id']}/notify-test", "/api/backup/import"):
+            try:
+                load(path, "POST", {}, csrf)
+                raise AssertionError(f"preview accepted {path}")
+            except HTTPError as error:
+                # JSON 里的中文会以 \uXXXX 转义返回，这里解析后再比对。
+                assert error.code == 400 and "审核预览" in json.loads(error.read().decode())["error"], path
+        assert docker("exec", name, "cat", "/data/synthetic-preview.txt").strip() == "Fictional data only"
+
+        # 手动执行走本地模拟：约 20 秒后成功，全程不访问中国移动。
+        normal = next(item for item in accounts if item["summary"]["state"] == "normal")
+        run_id = load(f"/api/accounts/{normal['id']}/run", "POST", {"task": "sign"}, csrf)["run_id"]
+        for _ in range(90):
+            rows = {item["id"]: item for item in load("/api/runs?page_size=20")["runs"]}
+            if rows.get(run_id, {}).get("status") in ("success", "failed", "partial", "interrupted"):
+                break
+            time.sleep(1)
+        else:
+            raise AssertionError("preview run did not finish")
+        assert rows[run_id]["status"] == "success", rows[run_id]
+        assert "审核预览模拟" in (rows[run_id]["message"] or ""), rows[run_id]
+
+        # 数据目录里已有真实账号时预览必须拒绝启动，避免把正式实例切成模拟。
+        docker("volume", "create", refused)
+        docker("run", *platform, "--rm", "-v", f"{refused}:/data", "--entrypoint", "python", image, "-c", """
+from pathlib import Path
+from cmcc_app.models import Store, normalize_account
+Store(Path('/data')).save(normalize_account({"name": "real", "config": {"phone": "13800001234", "app_token": "example-only"}}))
+""")
+        # 容器的中文提示是 UTF-8：Windows 默认用 GBK 解码会失败，必须显式指定编码。
+        denied = subprocess.run(["docker", "run", *platform, "--rm", "-v", f"{refused}:/data",
+                                 "-e", "CMCC_PREVIEW=1", image],
+                                capture_output=True, encoding="utf-8", errors="replace", check=False)
+        assert denied.returncode != 0, denied.stdout
+        assert "空的独立预览目录" in denied.stdout + denied.stderr, denied.stdout + denied.stderr
+        print("Preview check passed: 6 fictional accounts, preview banner, blocked notify/import, "
+              "locally simulated run, real data refused")
+    finally:
+        subprocess.run(["docker", "rm", "-f", name], stdout=subprocess.DEVNULL, check=False)
+        for item in (volume, refused):
+            subprocess.run(["docker", "volume", "rm", item], stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL, check=False)
+
+
 def main():
     suffix = secrets.token_hex(5)
     name, volume = f"cmcc-test-{suffix}", f"cmcc-data-test-{suffix}"
@@ -203,10 +289,11 @@ assert paths[-1].read_bytes() == b'{"test":"never-send"}'
         assert all(owner[:2] == [int(uid), int(gid)] for owner in ownership), ownership
         assert ownership[2][2] == 0o600 and ownership[3][2] == 0o600, ownership
         docker("exec", name, "python", "-m", "cmcc_app.bootstrap", "healthcheck")
+        preview_case(docker, image, platform, http_timeout, suffix)
         print(f"Docker smoke passed: {mount_type}, UID/GID={uid}:{gid}, UMASK={mask}; "
               "permission repair, login, password change, CRUD, restart persistence, "
               "encrypted backup export and import, runtime identity/capabilities, "
-              "read-only filesystem, healthcheck")
+              "read-only filesystem, healthcheck, audit preview")
     except Exception:
         subprocess.run(["docker", "logs", name], check=False)
         raise

@@ -1,5 +1,59 @@
 # 验证记录
 
+## 1.6.7 发布（2026-10-15）
+
+发布前：`python -m unittest discover -s tests -q` 共 168 项通过（4 项 Linux 专用测试在 Windows 跳过）；`docker build -t cmcc-daily:test .` 后 `python tests/container_smoke.py` 通过（含审核预览用例）；在本机 Docker 审核预览（`cmcc-preview-cmcc-1`，0.0.0.0:18081）里用浏览器逐页自检账号总览、秒杀任务页（含示例活动）、秒杀结果弹窗与一键执行弹窗，桌面与 390×844 手机宽度各看一遍。
+
+发布：`docker buildx build --platform linux/amd64,linux/arm64 --provenance=false --sbom=false -t rain5201/cmcc-daily:1.6.7 -t rain5201/cmcc-daily:latest --push .` 推送成功，两个标签指向同一索引 `sha256:6f32710e…`（AMD64 清单 `sha256:63820cdc…`，ARM64 清单 `sha256:77732b06…`）。第一次推送时 `auth.docker.io` 直连被重置（`failed to fetch oauth token ... connection forcibly closed`），设置 `HTTP_PROXY`/`HTTPS_PROXY=http://127.0.0.1:7890` 后成功；这条经验已写进 `docs/PUBLISHING.md`。发布后 `docker pull rain5201/cmcc-daily:1.6.7` 拉到的镜像 ID 与该索引摘要一致，并对该镜像运行容器冒烟测试（通过）。
+
+## 审核预览里发现的三处界面问题（2026-10-15）
+
+审核 1.6.7 预览时发现并修好三处，都是「秒杀任务」接进来后暴露的：
+
+1. **账号总览整页渲染失败**：`accountSchedules()` 只按 `taskOrder`（签到／拼图／评价／话费）补默认计划，账号卡片却按后端返回的 `summary.tasks` 渲染；只要某账号有过秒杀记录，`schedules["seckill"]` 就是 `undefined`，`schedule.enabled` 抛 "Cannot read properties of undefined (reading 'enabled')"，卡片渲染中断、右上角显示「连接异常」并弹出红色提示。现在新增 `taskKeys`（与后端 `TASK_ORDER` 一致，含 `seckill`）用于 `accountSchedules`，卡片取值再加 `|| defaultSchedule` 兜底。
+2. **秒杀结果弹窗的小字说明被账号按钮压住**（用户截图反馈）：说明文字用了 `.field-hint` 的 `margin-top:-7px`，紧贴按钮最后一行，按钮底边正好压在文字首行上。现在 `.dialog-footnote` 自带 `margin:16px 0 0`，列表高度改为 `min(380px,46vh)`，窗口变矮时先收缩列表而不是顶到说明文字。实测（浏览器实测 DOM 矩形）：按钮底边 417px、说明文字顶边 433px，间隔 16px；手机宽度 390×844 下说明折成 2 行同样保持 16px 间隔，弹窗高 422px < 90vh。
+3. **一键执行弹窗漏掉秒杀，且与后端判定不一致**：`planFor` 原先只遍历 `taskOrder`，而后端 `runnable_tasks` 含 `seckill`——弹窗不提秒杀，提交后却出现秒杀记录；同时 `taskMark` 对秒杀一律返回「将执行」。现在弹窗按 `taskKeys` 列出五个任务，秒杀按最近一次结果判定：最近已成功时在「只执行未完成和出错的」下显示「已执行成功，本次跳过」、切到「全部执行」显示「重复执行（最近一次已成功）」、排队或执行中显示跳过，与后端 `select_tasks` 的 pending／all 语义一致；「只执行已开启计划的任务」下秒杀没有账号级计划，与后端一样跳过。审核预览实测：批量弹窗显示「示例 · 日常账号」为 每日签到跳过、周三拼图将执行、评价有礼跳过、话费查询跳过、假期秒杀已执行成功本次跳过，汇总「将提交 11 个任务，另有 19 个会跳过」（6 账号 × 5 任务），与后端返回的提交数一致。
+
+单元测试 `python -m unittest discover -s tests -q` 共 168 项通过（4 项 Linux 专用测试在 Windows 跳过），新增 `tests/test_history.py` 两项：前端 `taskKeys` 必须等于后端 `TASK_ORDER`（缺 seckill 会重现上面的崩溃）、账号卡片必须保留 `schedules[entry.task] || defaultSchedule` 兜底；以及结果弹窗样式必须保留 `.dialog-footnote{margin:16px 0 0` 与 `max-height:min(380px,46vh)`。`node --check cmcc_app/static/app.js` 通过。
+
+界面验证方式：用 Codex 内置浏览器打开审核预览（`http://127.0.0.1:18081/`，虚构数据、任务为本地模拟），登录后逐页截图核对；账号总览恢复渲染（右上角显示「审核预览」、6 张账号卡片齐全），秒杀结果弹窗与一键执行弹窗在桌面与 390×844 手机宽度下均无重叠、无报错。截图：`seckill-result-dialog-desktop.png`、`seckill-result-dialog-phone.png`（本次会话的临时产物目录，未进仓库）。
+
+## 秒杀活动配置真正生效（2026-10-15）
+
+改动：1.6.7 的「秒杀任务」页此前只做了界面与排队，活动卡片里的抢购参数既没保存也没传给脚本，属于「看着能配、实际不生效」。本次修好三处：
+
+1. 保存活动时的参数被丢弃。网页表单把 `lead`/`interval`/`max_attempts` 平铺在请求里（`readActivityForm`），而 `normalize_activity` 只读 `body["config"]`，于是三个值静默落回默认值；现在两种写法都接受（平铺优先、不认识的键忽略），保存后再读出来就是用户填的值。
+2. 活动参数到不了抢券脚本。秒杀任务改成带着 `activity_id` 入队（`runs.activity_id` 新列 + 旧库自动 `ALTER TABLE`），执行时由 `Store.seckill_settings()` 取该活动（缺失时退到第一个已启用的活动，再退回默认值）并把参数作为 worker 的第 5 个参数交给 `cmcc_seckill`，`worker.task_args` 拼成 `--lead`/`--interval`/`--max-attempts`（非法值不拼，留给脚本用自己的默认值），日志里会打印「秒杀活动：名称（开抢时间…）」。其他任务不追加该参数。
+3. 排队时机来不及。定时活动过去按 `next_run` 准点入队，子进程启动时已经晚于「开抢时间 − 提前量」；现在提前「提前量 + 60 秒」入队（`SECKILL_ENQUEUE_AHEAD`），脚本先建会话、校时、拉场次、确认当日签到资格，再在开抢时刻前提前量秒开火，下一场从这次的场次时间往后算，同一次开抢不会重复排队。活动卡片里补了一行说明。
+
+顺带修掉一个死判断：`delete_activity` 原本拿活动 id 去比 `runs.account_id`（永远匹配不上），现在改成按 `activity_id` 检查，还有排队或执行中的秒杀任务时拒绝删除并提示「请先停止再删除」。审核预览的示例数据里加了 1 个虚构活动（示例 · 假期抢券，12:00:00，提前量 3 秒，间隔 0.5 秒，最多 40 次，全部 6 个虚构账号），并且预览里的秒杀也按账号并行模拟，方便点「立即执行」看结果弹窗。
+
+单元测试 `python -m unittest discover -s tests -q` 共 166 项通过（4 项 Linux 专用测试在 Windows 跳过），新增/加强覆盖：`task_args` 对秒杀拼出三个开关且非法值不拼、其他任务不追加参数；`test_runner` 走真实 `Manager._execute_body` 断言第 5 个参数就是活动的 `{name,time,lead,interval,max_attempts}`；网页接口保存活动后三个参数原样读回；秒杀记录带 `activity_id`；定时活动超过「提前量 + 预热 1 分钟」不排队、进入窗口才排队且同一场次只入队一次；删除活动在有待执行秒杀任务时返回 400。
+
+容器验证：`docker build -t cmcc-daily:test .` 后 `python tests/container_smoke.py` 通过（含审核预览用例）。镜像内直接验证：`task_args("seckill", …, {"lead":3,"interval":0.5,"max_attempts":40})` 得到 `--lead 3 --interval 0.5 --max-attempts 40`；`python cmcc_seckill.py --config /tmp/missing.json --lead 3 --interval 0.5 --max-attempts 40` 被脚本正常解析（只报缺少 app_token，未联网）；用真实 worker 入口跑一次秒杀任务，日志打印「秒杀活动：示例抢券（开抢时间 12:00:00，提前量 3 秒，重试间隔 0.5 秒，最多 40 次）」后按脚本流程失败在缺失配置上。
+
+真实运行验证（本机 Docker 审核预览 0.0.0.0:18081，模拟执行）：`GET /api/activities` 返回 1 个示例活动、6 个账号、`config` 为 `{lead:3, interval:0.5, max_attempts:40}`；以平铺方式 `PUT` 改成 8/0.6/66 后立刻读回一致（下次执行 12:00:00）；`POST /api/activities/<id>/run` 返回 202 并为 6 个账号各排一个秒杀任务，21.4 秒后 6 条记录全部 success（并行模拟），活动卡片的「账号结果」有 6 条且成功率为 100%。全程未访问中国移动接口，正式实例（127.0.0.1:18080 的 1.6.6）不受影响。
+
+## 审核预览改在 Docker 里跑（2026-10-15）
+
+改动：测试版预览从「本机 Python 脚本」改为「容器内预览模式」。新增 `cmcc_app/preview.py`：首次启动向空的独立数据目录写入 6 个虚构账号（覆盖正常／凭证失效／部分异常／正在执行／排队中／尚未验证，其中 2 条排队记录固定保留）并留下 `synthetic-preview.txt` 标记；替换调度器的 `recover`、`schedule_due`、`schedule_activities_due` 与 `Manager.execute`，让定时计划与秒杀活动到点不排队、任务改为本地模拟（约 20 秒）；页面顶部显示预览横幅、`/api/accounts` 返回 `preview: true`（前端据此把状态显示成「审核预览」）、通知测试与备份导入返回 400。数据目录里已有账号或执行记录时拒绝启动，避免把正式实例切成模拟。新增 `compose.preview.yaml`（项目名 `cmcc-preview`、端口 18081、数据卷隔离、默认密码 123456，且不读取正式实例的 `.env` 变量）；删除 `tools/preview_server.py`，`tools/preview_seed.py` 改为调用 `cmcc_app.preview.seed` 的薄封装（手动给空目录生成示例数据仍可用）。`CMCC_PREVIEW=1` 必须与调度器启动顺序配合：预览先在 `install()` 里替换 `recover` 再启动调度线程，否则示例里的「正在执行」会被当成中断。
+
+单元测试 `python -m unittest discover -s tests -q` 共 164 项通过（4 项 Linux 专用测试在 Windows 跳过，1.6.7 秒杀相关既有用例不变），新增 `tests/test_preview.py` 12 项：`CMCC_PREVIEW` 取值解析、空目录一次性写入示例数据（6 个账号、12 条记录、标记文件）、已有真实记录时拒绝写入、页面横幅与 `preview` 标记、定时计划与活动不排队、示例「正在执行／排队中」不被取走而新任务照常执行、签到模拟结果的子步骤（claim=empty／tasks=skipped／games=ok）、仅查询与秒杀（并行）模拟、停止后记为 interrupted、通知测试与备份导入被拒、导出备份只含虚构数据、以及调度线程在 `install()` 之后启动才保留示例状态。
+
+容器验证：`docker build -t cmcc-daily:test .` 后运行 `python tests/container_smoke.py` 通过，冒烟测试新增审核预览用例——6 个虚构账号与 `preview: true`、页面横幅、`synthetic-preview.txt`、通知测试与备份导入返回 400、手动签到约 20 秒后成功且提示「审核预览模拟」、以及把真实账号写进数据目录后 `CMCC_PREVIEW=1` 启动失败并提示「只能用于空的独立预览目录」。原来的权限修复、登录、改密、CRUD、重启持久化、备份导入导出、运行用户与能力、只读文件系统与健康检查用例仍全部通过。
+
+真实运行验证：`docker compose -f compose.preview.yaml up -d --build` 起本机预览（0.0.0.0:18081，容器 `cmcc-preview-cmcc-1`，健康检查通过），页面显示预览横幅，`/api/accounts` 返回 6 个虚构账号且状态覆盖 6 种，手动执行签到 21.4 秒后为 success，结构化结果为 main=ok／claim=empty／tasks=skipped／games=ok，执行记录 12 条示例 + 1 条手动。全程未访问中国移动接口、未发送通知；正式实例（`rain5201/cmcc-daily:1.6.6`，127.0.0.1:18080）不受影响。当时尚未推送镜像与代码，后续按“发布”流程一并完成。
+
+顺带修复：`tests/test_account_status.py::test_summary_independent_of_history_page_and_auth_required` 依赖真实时钟（用例固定 2026-10-14 12:00，接口按当天算计划窗口），跨零点后必然失败；改为在该请求里把 `cmcc_app.account_status.utcnow` 固定成用例时间，只改用例不改功能。
+
+## 1.6.7：秒杀任务、Docker 审核预览与界面修复（2026-10-14 起）
+
+改动：上游 `cmcc_seckill.py` 接入网页应用，成为第五种任务；新增侧边栏「秒杀任务」页，以活动为单位配置开抢时间（精确到秒）、提前量、重试间隔、最大尝试次数与活动日；全部账号自动参与，到点由调度器按账号排队 `seckill`，同一场次只入队一次；支持活动卡片手动「立即执行」与结果弹窗（成功率、各状态数量、复制成功/失败名单）；活动 CRUD 接口 `GET/POST/PUT/DELETE /api/activities` 与 `POST /api/activities/<id>/run`。秒杀的 dry-run 语义与查询分离：网页执行秒杀始终为正式模式（到点抢券），排队与执行仍受全局串行队列约束。
+
+单元测试 `python -m unittest discover -s tests -q` 共 152 项通过（4 项 Linux 专用测试在 Windows 跳过），新增覆盖：活动 CRUD（同名拒绝、未知 kind 拒绝、空账号列表表示全部账号）、手动执行为每个账号排队并在重复时跳过、到点调度入队且同场次不重复、秒杀任务并行取走（不同账号可同时 running）、结果接口返回每账号最近一次状态、`worker` 对秒杀任务的参数拼装（正式无 --dry-run）、模板与脚本对侧边栏入口、活动卡片、结果弹窗（成功率/复制）与函数的校验。
+
+真实运行验证（本地审核预览 0.0.0.0:18081，模拟数据）：创建活动（空账号列表=全部 6 个账号）返回 201；手动执行返回 202 并为 6 个账号各排一个 `seckill` 任务；results 覆盖全部账号；编辑弹窗已无账号勾选，结果弹窗含成功率高亮与「复制结果」按钮；侧边栏出现「秒杀任务」入口。未真实调用移动接口。
+
 ## 1.6.6：AI 豆跳过与一键执行范围选项（2026-10-14）
 
 改动：AI 豆「需要真实操作而跳过」不再让整次执行变成部分成功（`cmcc_extra` 记为 success/skipped，`results.finish` 不再把 skipped 计入异常），子步骤结果带上原因代码，界面据此把这类标签渲染成中性的「部分跳过」；一键执行新增 `pending` / `all`（批量另有 `enabled`）三种范围，服务端按账号状态挑选任务，前端按任务逐条标注状态与跳过原因。

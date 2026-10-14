@@ -1,3 +1,4 @@
+import json
 import os
 import subprocess
 import sys
@@ -8,7 +9,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from cmcc_app.models import Store, normalize_account
+from cmcc_app.models import Store, normalize_account, normalize_activity
 from cmcc_app.runner import Manager
 from cmcc_app.settings import Settings
 
@@ -40,6 +41,36 @@ class RunnerTests(unittest.TestCase):
             self.manager.execute(run)
         self.assertFalse(list((self.root / "runtime").glob("*.json")))
         return self.store.run(run_id)
+
+    def test_seckill_activity_settings_reach_the_worker(self):
+        """活动里的提前量/重试间隔/最大尝试次数要作为第 5 个参数交给上游脚本。"""
+        activity = normalize_activity({"name": "示例抢券", "kind": "seckill", "time": "11:59:55",
+                                       "lead": 3, "interval": 0.5, "max_attempts": 40,
+                                       "weekdays": [0], "accounts": [], "enabled": True},
+                                      accounts=[self.account], timezone_name="Asia/Shanghai")
+        self.store.save_activity(activity)
+        seen = {}
+
+        def fake_worker(command, **kwargs):
+            seen["command"] = command
+            return self.real_popen([sys.executable, "-c", "print('mock seckill')"], **kwargs)
+
+        run_id = self.store.enqueue(self.account["id"], "seckill", activity_id=activity["id"])
+        run = self.store.take_run_parallel()
+        self.assertEqual(run["activity_id"], activity["id"])
+        with patch("cmcc_app.runner.subprocess.Popen", side_effect=fake_worker):
+            self.manager.execute(run)
+        command = seen["command"]
+        self.assertEqual(command[3], "seckill")
+        self.assertEqual(json.loads(command[-1]), {"name": "示例抢券", "time": "11:59:55", "lead": 3,
+                                                   "interval": 0.5, "max_attempts": 40})
+        self.assertEqual(self.store.run(run_id)["status"], "success")
+        # 其他任务不追加这个参数，避免上游脚本收到无法识别的开关。
+        seen.clear()
+        self.store.enqueue(self.account["id"], "sign")
+        with patch("cmcc_app.runner.subprocess.Popen", side_effect=fake_worker):
+            self.manager.execute(self.store.take_run())
+        self.assertEqual(len(seen["command"]), 7, seen["command"])
 
     def test_real_child_success_and_failure(self):
         result = self.execute_fake("print('mock execution complete')")

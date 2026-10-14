@@ -285,6 +285,60 @@ class HistoryViewTests(unittest.TestCase):
         self.assertIn("for (const account of matches)", self.script)
         self.assertIn("$('#account-count').textContent = matches.length;".replace("'", '"'), self.script)
 
+    def test_activities_view_holds_activity_content(self):
+        """秒杀任务以活动为主体：独立视图、卡片网格与添加入口。"""
+        view_elements = ("activities-view", "activity-grid", "activity-count", "add-activity",
+                         "empty-activities", "empty-add-activity")
+        for element in view_elements:
+            self.assertIn(element, self.paths)
+            ancestors = self.paths[element]
+            self.assertIn("app-view", ancestors, element)
+            if element != "activities-view":
+                self.assertIn("activities-view", ancestors, element)
+        for element in ("activity-dialog", "activity-form",
+                        "activity-weekdays", "activity-delete-dialog",
+                        "activity-result-dialog", "activity-result-list",
+                        "activity-result-summary"):
+            self.assertIn(element, self.paths)
+        self.assertIn('href="#activities" data-view="activities"', self.html)
+        self.assertIn("function renderActivities(", self.script)
+        self.assertIn("async function loadActivities(", self.script)
+        self.assertIn('api("/activities"', self.script)
+        self.assertIn("`/activities/${state.deletingActivity.id}`", self.script)
+        self.assertIn("假期秒杀", self.html)
+        self.assertIn("activity-avatar", self.style)
+
+    def test_client_task_list_matches_the_server(self):
+        """前端任务清单必须和后端 TASK_ORDER 一致：缺 seckill 时账号卡片会取到 undefined 而报错。"""
+        from cmcc_app.models import TASK_ORDER
+        match = re.search(r"const taskKeys = \[([^\]]+)\]", self.script)
+        self.assertIsNotNone(match, "缺少 taskKeys 声明")
+        keys = [item.strip().strip('"') for item in match.group(1).split(",") if item.strip()]
+        self.assertEqual(keys, list(TASK_ORDER))
+        # 账号卡片按后端返回的 tasks 渲染，未知任务要有兜底，不能再出现 schedules[entry.task] 为 undefined。
+        self.assertIn("schedules[entry.task] || defaultSchedule", self.script)
+        self.assertIn("for (const task of taskKeys)", self.script)
+
+    def test_activity_result_dialog_keeps_the_footnote_clear_of_the_buttons(self):
+        """结果弹窗的小字说明要有自己的上间距，列表高度随窗口收敛。"""
+        self.assertIn(".dialog-footnote{margin:16px 0 0", self.style)
+        self.assertIn("max-height:min(380px,46vh)", self.style)
+
+    def test_activity_result_dialog_replaces_account_list_on_card(self):
+        """秒杀卡片只保留摘要与按钮，账号明细收进结果弹窗。"""
+        for element in ("activity-result-dialog", "activity-result-title", "activity-result-list"):
+            self.assertIn(f'id="{element}"', self.html)
+        self.assertIn("function openActivityResult(", self.script)
+        self.assertIn("function resultTone(", self.script)
+        self.assertIn("秒杀成功", self.script)
+        self.assertIn("账号结果", self.script)
+        self.assertIn("成功率", self.script)
+        self.assertIn("复制结果", self.script)
+        self.assertIn("copyActivityResult(", self.script)
+        self.assertIn("全部账号都会参与本次秒杀", self.html)
+        self.assertNotIn('id="activity-accounts"', self.html)
+        self.assertIn(".account-result{", self.style)
+
     def test_confirmation_dialogs_replace_native_prompts(self):
         """二次确认一律走页面内弹窗，不再使用浏览器原生 confirm/alert。"""
         for element in ("confirm-dialog", "confirm-form", "confirm-eyebrow", "confirm-title",

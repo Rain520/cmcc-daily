@@ -22,6 +22,7 @@ class Manager(threading.Thread):
         self.heartbeat = time.monotonic()
         self.cancelled = set()
         self.cancel_lock = threading.Lock()
+        self.parallel_running = set()
         self.data = settings.data_dir
         for folder in ("logs", "runtime", "cache"):
             (self.data / folder).mkdir(parents=True, exist_ok=True)
@@ -52,17 +53,37 @@ class Manager(threading.Thread):
             while not self.stop_event.is_set():
                 self.heartbeat = time.monotonic()
                 self.store.schedule_due(self.settings.timezone)
+                for job in self.store.schedule_activities_due(self.settings.timezone):
+                    log.info("活动 %s 的秒杀任务已排队", job["account_id"])
                 if self.heartbeat - last_prune > 3600:
                     self.store.prune(self.settings.retention_days)
                     last_prune = self.heartbeat
-                if run := self.store.take_run():
+                if run := self.store.take_run_parallel():
+                    # 秒杀按账号并行：各账号独立子进程同时开火，互不占用常规队列。
+                    self.execute(run, parallel=True)
+                elif run := self.store.take_run():
                     self.execute(run)
                 else:
                     self.stop_event.wait(1)
         except Exception:
             log.exception("调度器异常停止，健康检查将失败")
 
-    def execute(self, run):
+    def _parallel_done(self, run_id):
+        with self.store.connect() as conn:
+            row = conn.execute("SELECT status FROM runs WHERE id=?", (run_id,)).fetchone()
+        return row is None or row[0] not in ("queued", "running")
+
+    def execute(self, run, parallel=False):
+        if parallel:
+            thread = threading.Thread(target=self._execute_body, args=(run,),
+                                      name=f"seckill-{run['id'][:8]}", daemon=True)
+            self.parallel_running.add(run["id"])
+            thread.start()
+            return
+
+        self._execute_body(run)
+
+    def _execute_body(self, run):
         run_id = run["id"]
         config_path = self.data / "runtime" / f"{run_id}.json"
         log_path = self.data / "logs" / f"{run_id}.log"
@@ -82,6 +103,9 @@ class Manager(threading.Thread):
                        TZ=self.settings.timezone)
             command = [sys.executable, "-m", "cmcc_app.worker", run["task"], str(config_path),
                        json.dumps(account["options"]), "1" if run["dry_run"] else "0"]
+            if run["task"] == "seckill":
+                # 活动的提前量/重试间隔/最大尝试次数要传给上游脚本，否则它只会用自带默认值。
+                command.append(json.dumps(self.store.seckill_settings(run.get("activity_id"))))
             with log_path.open("w", encoding="utf-8") as output:
                 process = subprocess.Popen(command, cwd=Path(__file__).resolve().parent.parent,
                                            env=env, stdout=output, stderr=subprocess.STDOUT)
@@ -138,4 +162,5 @@ class Manager(threading.Thread):
             result_path.unlink(missing_ok=True)
             with self.cancel_lock:
                 self.cancelled.discard(run_id)
+                self.parallel_running.discard(run_id)
                 self.store.finish(run_id, status, exit_code, message, result)

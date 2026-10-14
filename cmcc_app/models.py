@@ -15,14 +15,14 @@ CONFIG_DEFAULTS = {
     "serverchan_sendkey": "", "bark_url": "", "webhook_url": "", "webhook_token": "",
 }
 OPTION_DEFAULTS = {"claim": True, "tasks": False, "games": False, "wed": False}
-TASKS = {"sign": "每日签到", "wed": "周三拼图", "rate": "评价有礼", "fee": "话费查询"}
+TASKS = {"sign": "每日签到", "wed": "周三拼图", "rate": "评价有礼", "fee": "话费查询", "seckill": "假期秒杀"}
 
 
 def utcnow():
     return datetime.now(timezone.utc)
 
 
-TASK_ORDER = ("sign", "wed", "rate", "fee")
+TASK_ORDER = ("sign", "wed", "rate", "fee", "seckill")
 RUN_STATUSES = ("queued", "running", "success", "partial", "failed", "interrupted")
 RUN_SOURCES = ("manual", "schedule", "import")
 DATE_PATTERN = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
@@ -211,11 +211,97 @@ def normalize_account(body, old=None, timezone_name="Asia/Shanghai"):
 
 
 def runnable_tasks(account):
-    """一键执行时提交哪些任务：签到、拼图、评价有礼；话费查询需要先有话费会话。"""
-    tasks = ["sign", "wed", "rate"]
+    """一键执行时提交哪些任务：签到、拼图、评价有礼、假期秒杀；话费查询需要话费会话。"""
+    tasks = ["sign", "wed", "rate", "seckill"]
     if account["config"].get("fee_session_cookie"):
         tasks.append("fee")
     return tasks
+
+
+SECKILL_DEFAULTS = {"lead": 5, "interval": 0.35, "max_attempts": 120, "time": "11:59:55"}
+# 秒杀必须提前排队：先建立会话、校时、拉取场次、确认当日签到资格，才能按提前量准时开火。
+SECKILL_ENQUEUE_AHEAD = 60
+ACTIVITY_KINDS = ("seckill",)
+SECKILL_TIME_PATTERN = re.compile(r"(?:[01][0-9]|2[0-3]):[0-5][0-9](?::[0-5][0-9])?")
+
+
+def normalize_activity(body, old=None, accounts=None, timezone_name="Asia/Shanghai"):
+    """校验一个活动任务卡片：kind、执行时间与要执行的账号。"""
+    old = old or {}
+    kind = body.get("kind", old.get("kind"))
+    if kind not in ACTIVITY_KINDS:
+        raise ValueError("活动类型不支持")
+    name = body.get("name", old.get("name", ""))
+    if not isinstance(name, str) or not 1 <= len(name.strip()) <= 40:
+        raise ValueError("活动名称应为 1～40 个字符")
+    nested = body.get("config", {})
+    if not isinstance(nested, dict):
+        raise ValueError("活动配置必须是对象")
+    # 网页表单把三个抢购参数平铺在顶层，这里同时接受平铺和 {config:{...}} 两种写法；
+    # 不认识的键会被忽略，避免旧客户端多传字段就保存失败。
+    supplied = {key: value for key, value in nested.items() if key in SECKILL_DEFAULTS}
+    for field in ("lead", "interval", "max_attempts"):
+        if field in body:
+            supplied[field] = body[field]
+    config = {**SECKILL_DEFAULTS, **old.get("config", {})}
+    for field in ("lead", "interval", "max_attempts"):
+        if field in supplied:
+            try:
+                value = float(supplied[field]) if field == "interval" else int(supplied[field])
+            except (TypeError, ValueError):
+                raise ValueError(f"活动配置 {field} 应为数字") from None
+            if field == "lead" and not 0 <= value <= 30:
+                raise ValueError("提前量应为 0～30 秒")
+            if field == "interval" and not 0.05 <= value <= 5:
+                raise ValueError("重试间隔应为 0.05～5 秒")
+            if field == "max_attempts" and not 1 <= value <= 600:
+                raise ValueError("最大尝试次数应为 1～600")
+            config[field] = value
+    time_value = body.get("time", old.get("time") or SECKILL_DEFAULTS["time"])
+    if not isinstance(time_value, str) or not SECKILL_TIME_PATTERN.fullmatch(time_value):
+        raise ValueError("开抢时间格式应为 HH:MM 或 HH:MM:SS")
+    supplied_accounts = body.get("accounts")
+    if supplied_accounts is not None and not isinstance(supplied_accounts, list):
+        raise ValueError("执行账号格式不正确")
+    if supplied_accounts is None and old.get("accounts"):
+        phone_list = old["accounts"]
+    else:
+        # 全部账号参与：不选或留空都表示所有账号。
+        phone_list = list(dict.fromkeys(item["id"] for item in accounts)) if accounts is not None else (supplied_accounts or [])
+    weekdays = body.get("weekdays", old.get("weekdays"))
+    if weekdays is None:
+        weekdays = list(range(7))
+    if (not isinstance(weekdays, list) or not weekdays
+            or any(not isinstance(day, int) or isinstance(day, bool) or not 0 <= day <= 6 for day in weekdays)):
+        raise ValueError("活动日应为周一到周日中的若干天")
+    weekdays = sorted(set(weekdays))
+    return {"id": old.get("id", uuid.uuid4().hex), "name": name.strip(), "kind": kind,
+            "config": config, "time": time_value, "weekdays": weekdays,
+            "accounts": phone_list, "enabled": bool(body.get("enabled", old.get("enabled", False))),
+            "next_run": None}
+
+
+def activity_next_run(activity, timezone_name="Asia/Shanghai", now=None):
+    """活动的下一次开抢时间（HH:MM:SS 支持秒级）。"""
+    now = (now or utcnow()).astimezone(ZoneInfo(timezone_name))
+    hh, mm, *ss = activity["time"].split(":")
+    target = now.replace(hour=int(hh), minute=int(mm),
+                         second=int(ss[0]) if ss else 0, microsecond=0)
+    days = activity["weekdays"]
+    for offset in range(8):
+        candidate = target + timedelta(days=offset)
+        if candidate.weekday() in days and candidate > now:
+            return candidate.astimezone(timezone.utc).isoformat()
+    return None
+
+
+def seckill_enqueue_ahead(activity):
+    """这场秒杀要提前多少秒排队：抢购脚本的提前量 + 预热时间。"""
+    return float(activity["config"].get("lead", SECKILL_DEFAULTS["lead"])) + SECKILL_ENQUEUE_AHEAD
+
+
+def public_activity(activity):
+    return {**activity, "account_count": len(activity["accounts"]), "all_accounts": True}
 
 
 def public_account(account):
@@ -246,12 +332,20 @@ class Store:
                     id TEXT PRIMARY KEY, account_id TEXT NOT NULL, account_name TEXT NOT NULL,
                     task TEXT NOT NULL, dry_run INTEGER NOT NULL, source TEXT NOT NULL,
                     status TEXT NOT NULL, created_at TEXT NOT NULL, started_at TEXT,
-                    finished_at TEXT, exit_code INTEGER, message TEXT NOT NULL DEFAULT ''
+                    finished_at TEXT, exit_code INTEGER, message TEXT NOT NULL DEFAULT '',
+                    activity_id TEXT
                 );
                 CREATE UNIQUE INDEX IF NOT EXISTS one_pending_per_account_task
                     ON runs(account_id, task) WHERE status IN ('queued', 'running');
                 CREATE INDEX IF NOT EXISTS runs_created ON runs(created_at DESC);
+                CREATE TABLE IF NOT EXISTS activities (
+                    id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, kind TEXT NOT NULL,
+                    config TEXT NOT NULL, accounts TEXT NOT NULL,
+                    enabled INTEGER NOT NULL, next_run TEXT
+                );
             """)
+            columns = {row["name"] for row in conn.execute("PRAGMA table_info(accounts)")}
+            _ = columns  # 下方沿用同一个集合做账号表迁移
             # 1.6.3 起同一账号的不同任务可以并存于队列，只限制同一任务重复提交。
             conn.execute("DROP INDEX IF EXISTS one_pending_per_account")
             # 1.3 及更早版本只有一条每日签到计划，旧记录按原有列还原。
@@ -265,6 +359,9 @@ class Store:
             run_columns = {row["name"] for row in conn.execute("PRAGMA table_info(runs)")}
             if "result" not in run_columns:
                 conn.execute("ALTER TABLE runs ADD COLUMN result TEXT")
+            # 1.6.7 起秒杀记录记住自己来自哪个活动，执行时据此取活动的抢购参数。
+            if "activity_id" not in run_columns:
+                conn.execute("ALTER TABLE runs ADD COLUMN activity_id TEXT")
             conn.execute("CREATE INDEX IF NOT EXISTS runs_account_task ON runs(account_id,task,dry_run,created_at DESC)")
 
     @contextmanager
@@ -349,18 +446,18 @@ class Store:
             conn.execute("DELETE FROM accounts WHERE id=?", (account_id,))
 
     @staticmethod
-    def insert_run(conn, account, task, dry_run, source, now):
+    def insert_run(conn, account, task, dry_run, source, now, activity_id=None):
         run_id = uuid.uuid4().hex
         try:
             conn.execute("""INSERT INTO runs
-                (id,account_id,account_name,task,dry_run,source,status,created_at)
-                VALUES (?,?,?,?,?,?,'queued',?)""",
-                (run_id, account["id"], account["name"], task, dry_run, source, now))
+                (id,account_id,account_name,task,dry_run,source,status,created_at,activity_id)
+                VALUES (?,?,?,?,?,?,'queued',?,?)""",
+                (run_id, account["id"], account["name"], task, dry_run, source, now, activity_id))
         except sqlite3.IntegrityError:
             raise ValueError(f"{TASKS[task]}已在排队或执行中，请等它结束后再提交") from None
         return run_id
 
-    def enqueue(self, account_id, task, dry_run=False):
+    def enqueue(self, account_id, task, dry_run=False, activity_id=None):
         with self.connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             account = self.decode(conn.execute("SELECT * FROM accounts WHERE id=?", (account_id,)).fetchone())
@@ -368,7 +465,10 @@ class Store:
                 raise ValueError("账号不存在")
             if task == "fee" and not account["config"]["fee_session_cookie"]:
                 raise ValueError("话费查询需要先填写话费会话 Cookie")
-            return self.insert_run(conn, account, task, dry_run, "manual", utcnow().isoformat())
+            if task == "seckill" and dry_run:
+                dry_run = False
+            return self.insert_run(conn, account, task, dry_run, "manual", utcnow().isoformat(),
+                                   activity_id if task == "seckill" else None)
 
     def schedule_due(self, timezone_name, now=None):
         """按每个任务自己的计划排队；同一账号同一时刻只保留一个待执行任务。"""
@@ -400,6 +500,18 @@ class Store:
                                     WHERE id=?""",
                                  (json.dumps(schedules, ensure_ascii=False), mirrors["enabled"],
                                   mirrors["schedule_time"], mirrors["next_run"], account["id"]))
+
+    def take_run_parallel(self):
+        """取一个待执行的秒杀任务（不同账号可同时开抢）。"""
+        with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute("SELECT * FROM runs WHERE status='queued' AND task='seckill' "
+                               "ORDER BY created_at LIMIT 1").fetchone()
+            if not row:
+                return None
+            conn.execute("UPDATE runs SET status='running',started_at=? WHERE id=?",
+                         (utcnow().isoformat(), row["id"]))
+            return dict(row)
 
     def take_run(self):
         with self.connect() as conn:
@@ -541,6 +653,135 @@ class Store:
                 FROM runs WHERE dry_run=0) WHERE rank=1 AND status IN ({marks})""",
                 tuple(statuses)).fetchall()
         return [dict(row) for row in rows]
+
+    def latest_seckill_results(self, account_ids):
+        """每个账号最近一次秒杀：状态、原因与完成时间。"""
+        marks = ",".join("?" * len(account_ids))
+        with self.connect() as conn:
+            rows = conn.execute(f"""SELECT * FROM (
+                SELECT *, ROW_NUMBER() OVER (PARTITION BY account_id ORDER BY created_at DESC,rowid DESC) AS rank
+                FROM runs WHERE task='seckill') WHERE rank=1""").fetchall()
+        results = {}
+        from .results import clean
+        for row in rows:
+            run = dict(row)
+            if run["account_id"] not in account_ids:
+                continue
+            outcome = clean(run.get("result"))
+            pending = run["status"] in ("queued", "running")
+            results[run["account_id"]] = {
+                "status": run["status"],
+                "message": run["message"],
+                "finished_at": run.get("finished_at") or run.get("created_at"),
+                "run_id": run["id"],
+                "success": (not pending and run["status"] == "success"
+                            and (outcome or {}).get("reason") not in ("business", "auth", "fee_auth", "network", "timeout")),
+                "pending": pending,
+            }
+        return results
+
+    def activities(self):
+        with self.connect() as conn:
+            return [self.decode_activity(row) for row in conn.execute("SELECT * FROM activities ORDER BY rowid")]
+
+    def activity(self, activity_id):
+        with self.connect() as conn:
+            return self.decode_activity(conn.execute("SELECT * FROM activities WHERE id=?",
+                                                     (activity_id,)).fetchone())
+
+    @staticmethod
+    def decode_activity(row):
+        if row is None:
+            return None
+        value = dict(row)
+        config = json.loads(value["config"])
+        value["config"] = {key: config[key] for key in SECKILL_DEFAULTS if key in config}
+        value["time"] = config.get("time") or SECKILL_DEFAULTS["time"]
+        value["weekdays"] = config.get("weekdays") or list(range(7))
+        value["accounts"] = json.loads(value["accounts"])
+        value["enabled"] = bool(value["enabled"])
+        return value
+
+    def save_activity(self, activity, timezone_name="Asia/Shanghai"):
+        with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            activity["next_run"] = activity_next_run(activity, timezone_name)
+            stored = {**activity["config"], "time": activity["time"], "weekdays": activity["weekdays"]}
+            try:
+                conn.execute("""INSERT INTO activities (id,name,kind,config,accounts,enabled,next_run)
+                    VALUES (?,?,?,?,?,?,?)
+                    ON CONFLICT(id) DO UPDATE SET name=excluded.name, config=excluded.config,
+                    accounts=excluded.accounts, enabled=excluded.enabled, next_run=excluded.next_run""",
+                             (activity["id"], activity["name"], activity["kind"],
+                              json.dumps(stored), json.dumps(activity["accounts"]),
+                              activity["enabled"], activity["next_run"]))
+            except sqlite3.IntegrityError:
+                raise ValueError("已有同名活动") from None
+        return activity
+
+    def delete_activity(self, activity_id):
+        with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            pending = conn.execute("SELECT COUNT(*) FROM runs WHERE activity_id=? AND status IN "
+                                   "('queued','running')", (activity_id,)).fetchone()[0]
+            if pending:
+                raise ValueError(f"活动还有 {pending} 个排队或执行中的秒杀任务，请先停止再删除")
+            conn.execute("DELETE FROM activities WHERE id=?", (activity_id,))
+
+    def schedule_activities_due(self, timezone_name, now=None):
+        """活动到点前排队秒杀：提前「提前量 + 预热时间」入队，让脚本赶在开抢前就位。"""
+        now = now or utcnow()
+        queued = []
+        with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            for row in conn.execute("SELECT * FROM activities").fetchall():
+                activity = self.decode_activity(row)
+                if not activity["enabled"]:
+                    continue
+                due = activity.get("next_run")
+                if not due:
+                    continue
+                fire = datetime.fromisoformat(due)
+                if now < fire - timedelta(seconds=seckill_enqueue_ahead(activity)):
+                    continue
+                account_rows = conn.execute("SELECT * FROM accounts").fetchall()
+                decoded = {item["id"]: self.decode(item) for item in account_rows}
+                for account_id in activity["accounts"]:
+                    account = decoded.get(account_id)
+                    if account is None:
+                        continue
+                    try:
+                        run_id = self.insert_run(conn, account, "seckill", False, "schedule",
+                                                 now.isoformat(), activity["id"])
+                    except ValueError:
+                        continue  # 该账号已有同任务在队列，跳过
+                    queued.append({"account_id": account_id, "task": "seckill", "run_id": run_id})
+                # 下一场从这次的场次时间往后算，避免同一次开抢被重复排队。
+                activity["next_run"] = activity_next_run(activity, timezone_name, fire)
+                conn.execute("UPDATE activities SET next_run=? WHERE id=?",
+                             (activity["next_run"], activity["id"]))
+        return queued
+
+    def seckill_settings(self, activity_id=None):
+        """这条秒杀记录要用的抢购参数：优先它所属的活动，其次第一个已启用的活动，最后用默认值。"""
+        activities = self.activities()
+        activity = (next((item for item in activities if item["id"] == activity_id), None)
+                    or next((item for item in activities if item["enabled"]), None))
+        config = activity["config"] if activity else SECKILL_DEFAULTS
+        return {"name": activity["name"] if activity else "默认参数",
+                "time": activity["time"] if activity else SECKILL_DEFAULTS["time"],
+                "lead": config.get("lead", SECKILL_DEFAULTS["lead"]),
+                "interval": config.get("interval", SECKILL_DEFAULTS["interval"]),
+                "max_attempts": config.get("max_attempts", SECKILL_DEFAULTS["max_attempts"])}
+
+    def pending_runs_for_activity_accounts(self, activity):
+        """活动卡片显示：哪些账号的秒杀还在排队或执行中。"""
+        marks = ",".join("?" * len(activity["accounts"]))
+        with self.connect() as conn:
+            rows = conn.execute(f"SELECT account_id, status FROM runs WHERE task='seckill' "
+                                f"AND status IN ('queued','running') AND account_id IN ({marks})",
+                                tuple(activity["accounts"])).fetchall()
+        return {row["account_id"]: row["status"] for row in rows}
 
     def pending_tasks(self):
         """每个账号各自待执行/运行中的任务；界面据此只禁用对应那一项。"""

@@ -21,7 +21,8 @@ from .backup import (MAX_FILE_BYTES, apply_payload, build_payload, check_passphr
                       decrypt_payload, encrypt_payload)
 from .logging_utils import redact
 from .models import (DATE_PATTERN, RUN_SOURCES, RUN_STATUSES, TASKS, TASK_ORDER, Store,
-                     normalize_account, public_account, runnable_tasks)
+                     normalize_account, public_account, public_activity, runnable_tasks,
+                     normalize_activity)
 from .runner import Manager
 from .storage import account_key, atomic_json
 
@@ -214,6 +215,62 @@ def create_app(settings, start_manager=False):
         (settings.data_dir / "cache" / f"jwt-{account_key(account['config']['phone'])}.json").unlink(missing_ok=True)
         return jsonify(ok=True)
 
+    @app.get("/api/activities")
+    @authenticated
+    def activities():
+        items = store.activities()
+        results = store.latest_seckill_results({account_id for item in items for account_id in item["accounts"]})
+        return jsonify(activities=[{**public_activity(item),
+                                   "results": {account_id: results.get(account_id) for account_id in item["accounts"]},
+                                   "pending": store.pending_runs_for_activity_accounts(item)}
+                                  for item in items])
+
+    @app.post("/api/activities")
+    @authenticated
+    def add_activity():
+        activity = normalize_activity(body(), accounts=store.accounts(),
+                                      timezone_name=settings.timezone)
+        store.save_activity(activity, settings.timezone)
+        return jsonify(activity=public_activity(activity)), 201
+
+    @app.put("/api/activities/<activity_id>")
+    @authenticated
+    def update_activity(activity_id):
+        old = store.activity(activity_id)
+        if not old:
+            return jsonify(error="活动不存在"), 404
+        activity = normalize_activity(body(), old, accounts=store.accounts(),
+                                      timezone_name=settings.timezone)
+        store.save_activity(activity, settings.timezone)
+        return jsonify(activity=public_activity(activity))
+
+    @app.delete("/api/activities/<activity_id>")
+    @authenticated
+    def delete_activity(activity_id):
+        if not store.activity(activity_id):
+            return jsonify(error="活动不存在"), 404
+        store.delete_activity(activity_id)
+        return jsonify(ok=True)
+
+    @app.post("/api/activities/<activity_id>/run")
+    @authenticated
+    def run_activity(activity_id):
+        """手动执行一个活动：为选中的账号分别排队秒杀。"""
+        activity = store.activity(activity_id)
+        if not activity:
+            return jsonify(error="活动不存在"), 404
+        if not_ready := scheduler_ready():
+            return not_ready
+        queued, skipped = [], []
+        for account_id in activity["accounts"]:
+            account = store.account(account_id)
+            if account is None:
+                continue
+            part_queued, part_skipped = submit_runs(account, ["seckill"], activity["id"])
+            queued += part_queued
+            skipped += part_skipped
+        return jsonify(queued=queued, skipped=skipped), 202
+
     @app.post("/api/accounts/<account_id>/run")
     @authenticated
     def run_account(account_id):
@@ -225,12 +282,13 @@ def create_app(settings, start_manager=False):
             return jsonify(error="调度器未运行，请检查容器状态"), 503
         return jsonify(run_id=store.enqueue(account_id, task, dry_run)), 202
 
-    def submit_runs(account, tasks):
+    def submit_runs(account, tasks, activity_id=None):
         """依次入队；同一任务已在执行或排队时跳过并在结果里说明原因。"""
         queued, skipped = [], []
         for task in tasks:
             try:
-                run_id = store.enqueue(account["id"], task, False)
+                run_id = store.enqueue(account["id"], task, False,
+                                       activity_id if task == "seckill" else None)
             except ValueError as error:
                 skipped.append({"account_id": account["id"], "account_name": account["name"],
                                 "task": task, "reason": str(error)})

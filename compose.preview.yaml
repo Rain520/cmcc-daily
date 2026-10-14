@@ -1,0 +1,57 @@
+# 本地审核预览（只在这台机器上跑，不进 Docker Hub，也不推送远程）：
+#
+#   docker compose -f compose.preview.yaml up -d --build     # 构建并启动预览
+#   docker compose -f compose.preview.yaml logs -f cmcc      # 看启动日志
+#   docker compose -f compose.preview.yaml down              # 停止，保留虚构数据
+#   docker compose -f compose.preview.yaml down -v           # 停止并重置（重新生成虚构数据）
+#
+# 打开 http://本机IP:18081 ，初始密码 123456。容器内 CMCC_PREVIEW=1：
+# 首次启动写入 6 个完全虚构的示例账号（覆盖全部账号状态），任务由本地模拟执行（约 20 秒），
+# 定时计划与秒杀活动到点不排队，通知测试与备份导入被拒绝，全程不联系中国移动。
+# 数据卷与正式实例完全隔离；数据目录里已有真实数据的目录会被拒绝启动。
+#
+# 注意不要改成读取 .env 里的 CMCC_WEB_PASSWORD / CMCC_WEB_PORT：那是正式实例的设置，
+# 预览必须用自己的变量名，否则会继承正式实例的密码和端口。
+name: cmcc-preview
+services:
+  cmcc:
+    build: .
+    image: cmcc-daily:preview
+    restart: "no"
+    init: true
+    ports:
+      - "${CMCC_PREVIEW_BIND:-0.0.0.0}:${CMCC_PREVIEW_PORT:-18081}:8000"
+    environment:
+      PUID: ${CMCC_PREVIEW_PUID:-10001}
+      PGID: ${CMCC_PREVIEW_PGID:-10001}
+      UMASK: ${CMCC_PREVIEW_UMASK:-077}
+      CMCC_PREVIEW: "1"
+      CMCC_WEB_PASSWORD: ${CMCC_PREVIEW_PASSWORD:-123456}
+      TZ: Asia/Shanghai
+      CMCC_TASK_TIMEOUT: "3600"
+      CMCC_RETENTION_DAYS: "30"
+      CMCC_SECURE_COOKIE: "false"
+    volumes:
+      - cmcc-preview-data:/data
+    read_only: true
+    tmpfs:
+      - /tmp:size=32m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+      - SETUID
+      - SETGID
+    stop_grace_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  cmcc-preview-data:

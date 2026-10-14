@@ -3,13 +3,15 @@ const $ = (selector) => document.querySelector(selector);
 const state = { csrf: "", timezone: "Asia/Shanghai", accounts: [], runs: [], editing: null, runAccount: null, logId: null, deleting: null, authenticated: false,
   runsTotal: 0, runsPages: 1, runsPage: 1, runsPageSize: 20, runsLatest: null, runsCounts: {},
   runsScanned: null, selected: new Set(), runsLoading: false, runsLoaded: false, pendingAccounts: new Set(), pendingTasks: new Set(),
-  accountQuery: "", accountStatus: "", rerunTask: null };
+  accountQuery: "", accountStatus: "", rerunTask: null, activities: [], editingActivity: null, deletingActivity: null };
+const weekdayFullLabels = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"];
 const labels = { queued: "等待执行", running: "正在执行", success: "执行完成", partial: "部分成功", failed: "执行失败", interrupted: "已停止" };
-const tasks = { sign: "每日签到", wed: "周三拼图", rate: "评价有礼", fee: "话费查询" };
-const taskOrder = ["sign", "wed", "rate", "fee"];
+const tasks = { sign: "每日签到", wed: "周三拼图", rate: "评价有礼", fee: "话费查询", seckill: "假期秒杀" };
+const taskOrder = ["sign", "wed", "rate", "fee"];          // 账号编辑里的四个计划（秒杀按活动管理）
+const taskKeys = ["sign", "wed", "rate", "fee", "seckill"];  // 与后端 TASK_ORDER 一致：执行记录与一键执行涵盖的任务
 const weekdayLabels = ["一", "二", "三", "四", "五", "六", "日"];
 const runTaskLabels = { sign: "每日签到（使用账号中保存的选项）", wed: "周三充值日拼图",
-  rate: "评价有礼（提交 10 分评价，不兑换）", fee: "话费余额查询" };
+  rate: "评价有礼（提交 10 分评价，不兑换）", fee: "话费余额查询", seckill: "假期秒杀（按场次自动等待并抢券）" };
 const defaultSchedule = { enabled: false, time: "08:23", frequency: "daily", weekdays: [] };
 const configFields = ["phone", "app_token", "province_code", "city_code", "serverchan_sendkey", "bark_url", "webhook_url", "webhook_token", "fee_session_cookie", "activity_id", "channel_id", "app_version_code", "carrier_operator"];
 const secretFields = ["app_token", "serverchan_sendkey", "bark_url", "webhook_url", "webhook_token", "fee_session_cookie"];
@@ -86,7 +88,8 @@ function scheduleText(entry) {
 }
 function accountSchedules(account) {
   const stored = (account && account.schedules) || {};
-  return Object.fromEntries(taskOrder.map(task => [task, { ...defaultSchedule, ...(stored[task] || {}) }]));
+  // 必须覆盖全部任务（含秒杀）：账号卡片按后端返回的 tasks 渲染，缺键会取到 undefined 而报错。
+  return Object.fromEntries(taskKeys.map(task => [task, { ...defaultSchedule, ...(stored[task] || {}) }]));
 }
 function buildScheduleRows(account) {
   const schedules = accountSchedules(account);
@@ -223,7 +226,7 @@ function renderAccounts() {
     const schedules = accountSchedules(account);
     const taskList = node("div", undefined, "account-task-list");
     for (const entry of summary.tasks) {
-      const schedule = schedules[entry.task];
+      const schedule = schedules[entry.task] || defaultSchedule;
       const row = node("div", undefined, "account-task-row");
       const line = node("div", undefined, "account-task-heading");
       let label = taskLabels[entry.state] || entry.state;
@@ -457,7 +460,7 @@ function openAccount(account = null) {
   $("#account-dialog").showModal();
 }
 function accountRunTasks(account) {
-  return taskOrder.filter(task => task !== "fee" || account.has_fee_session_cookie);
+  return runnableTaskKeys(account);
 }
 function batchToast(result) {
   const queued = (result.queued || []).length;
@@ -465,11 +468,220 @@ function batchToast(result) {
   if (!queued) return skipped ? `没有可提交的任务，跳过 ${skipped} 个` : "没有可提交的任务";
   return `已提交 ${queued} 个任务${skipped ? `，跳过 ${skipped} 个` : ""}，可在执行记录中查看`;
 }
+async function loadActivities(silent = false) {
+  try {
+    const payload = await api("/activities");
+    if (!state.authenticated) return;
+    state.activities = payload.activities;
+    state.accounts = payload.accounts;
+    renderActivities();
+  } catch (error) {
+    if (!silent) toast(error.message, true);
+  }
+}
+function renderActivities() {
+  const grid = $("#activity-grid");
+  grid.replaceChildren();
+  $("#empty-activities").hidden = state.activities.length > 0;
+  $("#activity-count").textContent = state.activities.length;
+  for (const activity of state.activities) {
+    const card = node("article", undefined, "account-card");
+    const top = node("div", undefined, "account-top");
+    const title = node("div", undefined, "account-title");
+    title.append(node("h3", activity.name), node("span", `假期秒杀 · ${activity.account_count} 个账号`, "account-phone"));
+    top.append(node("span", "◈", "avatar activity-avatar"), title,
+               node("span", activity.enabled ? "已启用" : "已停用", `badge ${activity.enabled ? "enabled" : ""}`));
+    const config = node("div", undefined, "schedule-info");
+    const days = (activity.weekdays || []).map(day => weekdayFullLabels[day]).join("、") || "每天";
+    config.append(node("span", "开抢时间"), node("strong",
+      `${activity.time}（提前 ${activity.config.lead} 秒 · 每 ${activity.config.interval} 秒一发，最多 ${activity.config.max_attempts} 发）`));
+    const days_line = node("div", undefined, "schedule-info");
+    days_line.append(node("span", "活动日"), node("strong", days));
+    const counts = (activity.results || {});
+    const totals = Object.values(counts);
+    const okCount = totals.filter(item => item && item.success).length;
+    const failedCount = totals.filter(item => item && !item.success && !item.pending).length;
+    const pendingCount = totals.filter(item => item && item.pending).length;
+    const summary = node("p", `${activity.account_count} 个账号 · 成功 ${okCount} · 失败 ${failedCount}`
+      + (pendingCount ? ` · 进行中 ${pendingCount}` : ""), "next-time");
+    const next = node("p", activity.enabled ? `下次执行 ${dateText(activity.next_run)}` : "已停用，可手动执行", "next-time");
+    const actions = node("div", undefined, "card-actions");
+    actions.append(button("立即执行  →", "button primary", () => runActivity(activity)),
+                   button("账号结果", "button secondary", () => openActivityResult(activity)),
+                   button("编辑", "button secondary", () => openActivity(activity)),
+                   button("删除", "text-button delete-button", () => openDeleteActivity(activity)));
+    card.append(top, config, days_line, summary, next, actions);
+    grid.append(card);
+  }
+}
+function resultTone(item) {
+  if (!item) return "none";
+  if (item.pending) return item.status === "queued" ? "queued" : "running";
+  return item.success ? "success" : "failed";
+}
+function resultLabel(item) {
+  if (!item) return "未执行";
+  if (item.pending) return item.status === "queued" ? "排队中" : "正在抢";
+  if (item.success) return "秒杀成功";
+  return item.message || "失败";
+}
+function openActivityResult(activity) {
+  $("#activity-result-title").textContent = activity.name;
+  const container = $("#activity-result-list");
+  const byId = Object.fromEntries(state.accounts.map(item => [item.id, item]));
+  const rows = [];
+  for (const [account_id, item] of Object.entries(activity.results || {})) {
+    const account = byId[account_id];
+    rows.push({ account, item, tone: resultTone(item), label: resultLabel(item) });
+  }
+  for (const account of state.accounts.filter(item => activity.accounts.includes(item.id))) {
+    if (!rows.some(row => row.account && row.account.id === account.id)) {
+      rows.push({ account, item: null, tone: "none", label: "未执行" });
+    }
+  }
+  const order = { success: 0, failed: 1, running: 2, queued: 3, none: 4 };
+  rows.sort((a, b) => order[a.tone] - order[b.tone] || (a.account?.name || "").localeCompare(b.account?.name || ""));
+  const success = rows.filter(row => row.tone === "success");
+  const failed = rows.filter(row => row.tone === "failed");
+  const summary = $("#activity-result-summary");
+  summary.replaceChildren();
+  const rate = rows.length ? `${success.length}/${rows.length}` : "—";
+  summary.append(node("span", `成功率 ${rate}`, "success-rate"),
+                 node("span", `成功 ${success.length}`, "pill pill-success"),
+                 node("span", `失败 ${failed.length}`, "pill pill-failed"),
+                 button("复制结果", "task-query copy-results", () => copyActivityResult(rows)));
+  container.replaceChildren();
+  for (const row of rows) {
+    // 整行即按钮：账号名着色区分状态，点击打开日志。
+    const line = button("", `account-result ${row.tone}`, () => {
+      if (row.item && row.item.run_id) openLog(row.item.run_id);
+    });
+    line.setAttribute("aria-label", `${row.account?.name || "未知账号"}：${row.label}${row.item?.run_id ? "，查看日志" : ""}`);
+    if (row.item && row.item.run_id) line.title = `${row.label} · 点击查看日志`;
+    line.append(node("strong", row.account ? row.account.name : "未知账号"));
+    container.append(line);
+  }
+  $("#activity-result-dialog").showModal();
+}
+async function copyActivityResult(rows) {
+  const names = tone => rows.filter(row => row.tone === tone).map(row => row.account?.name || "未知账号");
+  const lines = [`成功（${names("success").length}）`, ...names("success"),
+                 `失败（${names("failed").length}）`, ...names("failed")];
+  const text = lines.join("\n");
+  try {
+    await navigator.clipboard.writeText(text);
+    toast("已复制成功与失败的账号名单");
+  } catch (error) {
+    const area = document.createElement("textarea");
+    area.value = text;
+    document.body.append(area);
+    area.select();
+    document.execCommand("copy");
+    area.remove();
+    toast("已复制成功与失败的账号名单");
+  }
+}
+function readActivityForm(form) {
+  return {
+    name: form.elements.name.value,
+    time: form.elements.time.value,
+    lead: Number(form.elements.lead.value),
+    interval: Number(form.elements.interval.value),
+    max_attempts: Number(form.elements.max_attempts.value),
+    weekdays: Array.from(document.querySelectorAll('#activity-weekdays input:checked')).map(box => Number(box.dataset.day)),
+    accounts: [],
+    enabled: form.elements.enabled.checked,
+  };
+}
+function openActivity(activity) {
+  state.editingActivity = activity || null;
+  const form = $("#activity-form");
+  form.reset();
+  $("#activity-error").textContent = "";
+  $("#activity-dialog-title").textContent = activity ? "编辑活动" : "添加活动";
+  if (activity) {
+    form.elements.name.value = activity.name;
+    form.elements.time.value = activity.time;
+    form.elements.lead.value = activity.config.lead;
+    form.elements.interval.value = activity.config.interval;
+    form.elements.max_attempts.value = activity.config.max_attempts;
+    form.elements.enabled.checked = activity.enabled;
+  }
+  const weekdays = $("#activity-weekdays");
+  weekdays.replaceChildren();
+  const selected = activity ? (activity.weekdays || [0,1,2,3,4,5,6]) : [0,1,2,3,4,5,6];
+  for (let day = 0; day < 7; day += 1) {
+    const wrap = node("label", undefined, "checkbox");
+    const box = node("input");
+    box.type = "checkbox";
+    box.dataset.day = day;
+    box.checked = selected.includes(day);
+    wrap.append(box, document.createTextNode(weekdayFullLabels[day]));
+    weekdays.append(wrap);
+  }
+  $("#activity-dialog").showModal();
+}
+async function runActivity(activity) {
+  if (!await askConfirm({
+    title: "立即执行活动",
+    message: `执行活动「${activity.name}」？${activity.account_count} 个账号将依次排队秒杀。`,
+    confirmText: "开始执行",
+  })) return;
+  try {
+    const result = await api(`/activities/${activity.id}/run`, "POST", {});
+    toast(batchToast(result));
+    await refresh();
+    await loadActivities(true);
+  } catch (error) { toast(error.message, true); }
+}
+function openDeleteActivity(activity) {
+  state.deletingActivity = activity;
+  $("#delete-activity-name").textContent = `确定删除「${activity.name}」？`;
+  $("#delete-activity-error").textContent = "";
+  $("#activity-delete-dialog").showModal();
+}
+$("#add-activity").addEventListener("click", () => openActivity());
+$("#empty-add-activity").addEventListener("click", () => openActivity());
+$("#activity-form").addEventListener("submit", event => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  submit(form, "#activity-error", async () => {
+    const payload = readActivityForm(form);
+    if (state.editingActivity) await api(`/activities/${state.editingActivity.id}`, "PUT", payload);
+    else await api("/activities", "POST", payload);
+    $("#activity-dialog").close();
+    form.reset();
+    toast("活动已保存");
+    await loadActivities(true);
+    await refresh();
+  });
+});
+$("#confirm-delete-activity").addEventListener("click", async () => {
+  const control = $("#confirm-delete-activity");
+  control.disabled = true;
+  try {
+    await api(`/activities/${state.deletingActivity.id}`, "DELETE");
+    $("#activity-delete-dialog").close();
+    toast("活动已删除");
+    await loadActivities(true);
+  } catch (error) { $("#delete-activity-error").textContent = error.message; }
+  finally { control.disabled = false; }
+});
 function taskMark(account, task) {
+  const entry = runTaskEntry(account, task);
+  if (task === "seckill") {
+    // 秒杀没有账号级计划：这里按最近一次结果判断，与后端 select_tasks 的 pending 语义保持一致。
+    if (state.pendingTasks.has(`${account.id}:${task}`)) {
+      return { skip: true, tone: "muted", label: entry.state === "queued" ? "排队中，跳过" : "执行中，跳过" };
+    }
+    if (entry.state === "success") {
+      return { skip: false, tone: "repeat", done: true, label: "重复执行（最近一次已成功）" };
+    }
+    return { skip: false, tone: "new", label: entry.run_id ? "按最近场次自动等待并抢券" : "尚未执行过" };
+  }
   if (task === "fee" && !account.has_fee_session_cookie) {
     return { skip: true, tone: "muted", label: "未配置话费会话，跳过" };
   }
-  const entry = runTaskEntry(account, task);
   if (state.pendingTasks.has(`${account.id}:${task}`)) {
     return { skip: true, tone: "muted", label: entry.state === "queued" ? "排队中，跳过" : "执行中，跳过" };
   }
@@ -487,7 +699,8 @@ function taskMark(account, task) {
 function planFor(account, mode) {
   const schedules = accountSchedules(account);
   const rows = [];
-  for (const task of taskOrder) {
+  for (const task of taskKeys) {
+    // 秒杀没有账号级计划，勾选「只执行已开启计划」时与后端一样跳过它。
     if (mode === "enabled" && !schedules[task].enabled) continue;
     const mark = taskMark(account, task);
     const repeat = Boolean(mark.done) && mode === "all";
@@ -561,13 +774,16 @@ function syncBatchDialog() {
   $("#batch-hint").textContent = planHint(counts, tail);
   $("#batch-submit").disabled = counts.run === 0;
 }
+function runnableTaskKeys(account) {
+  return taskKeys.filter(task => task !== "fee" || account.has_fee_session_cookie);
+}
 function runTaskEntry(account, task) {
   return ((account.summary && account.summary.tasks) || []).find(entry => entry.task === task) || {};
 }
 function buildRunTasks(account) {
   const select = $("#run-task");
   select.replaceChildren();
-  for (const task of taskOrder) {
+  for (const task of taskKeys) {
     const busy = state.pendingTasks.has(`${account.id}:${task}`);
     const label = runTaskLabels[task] || tasks[task];
     const option = node("option", busy ? `${label}（已在队列中，不能重复提交）` : label);
@@ -1024,16 +1240,18 @@ document.querySelectorAll("[data-close]").forEach(control => control.addEventLis
 $("#account-dialog").addEventListener("close", () => { $("#account-form").reset(); });
 $("#log-dialog").addEventListener("close", () => { state.logId = null; });
 $("#delete-run").addEventListener("click", () => deleteRuns([state.logId], "删除这条执行记录？日志文件会一并删除。"));
-const viewTitles = { accounts: "账号总览", history: "执行记录" };
+const viewTitles = { accounts: "账号总览", activities: "秒杀任务", history: "执行记录" };
 function showView(name, updateHash = true) {
   const view = viewTitles[name] ? name : "accounts";
   state.view = view;
   $("#accounts-view").hidden = view !== "accounts";
+  $("#activities-view").hidden = view !== "activities";
   $("#history-view").hidden = view !== "history";
   $("#breadcrumb-view").textContent = viewTitles[view];
   document.querySelectorAll("[data-view]").forEach(link => link.classList.toggle("active", link.dataset.view === view));
   if (updateHash && window.location.hash !== `#${view}`) window.history.replaceState(null, "", `#${view}`);
   if (view === "history" && state.authenticated) loadRuns(true);
+  if (view === "activities" && state.authenticated) loadActivities(true);
   window.scrollTo({ top: 0, behavior: "smooth" });
 }
 document.querySelectorAll("[data-view]").forEach(link => {

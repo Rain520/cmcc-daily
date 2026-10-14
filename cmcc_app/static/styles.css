@@ -61,3 +61,28 @@ button.task-status{cursor:pointer}button.task-status:hover{filter:brightness(.95
 .run-all-item.problem .run-all-mark{background:#c4655c}
 .run-all-item.new .run-all-note{color:#7f8f95}
 .task-part.skipped{color:#8d9a9a;background:#f7f9f9;border-color:#e8eeec}
+
+/* Seckill activity result, 1.6.7 */
+.account-result{width:100%;text-align:left;border:1px solid #e6ecea;background:#fbfcfc;padding:9px 12px;border-radius:8px;margin-bottom:6px;display:flex;align-items:center;font-size:12px;color:#334e5b;cursor:pointer}
+.account-result strong{font-weight:600}
+.account-result.success{background:#eef8f2;border-color:#cfe8dc;color:#1f6f52}
+.account-result.failed{background:#fdf0ee;border-color:#f0d9d4;color:#a8453f}
+.account-result.running,.account-result.queued{background:#e8f1fa;border-color:#d3e3f1;color:#2f6da3}
+.account-result.none{background:#f2f4f4;color:#93a2a6}
+.account-result:hover{filter:brightness(.97);border-color:#bfd3cd}
+.account-result:focus-visible{outline:3px solid #87bfb0;outline-offset:2px}
+.result-summary{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:12px;font-size:12px}
+.success-rate{font-weight:650;color:#2c5f56}
+.pill{border-radius:12px;padding:2px 9px;font-size:11px;background:#eef3f2;color:#6a7a7d}
+.pill-success{background:#e5f5ec;color:#238460}
+.pill-failed{background:#fceeeb;color:#b9544c}
+.copy-results{padding:4px 9px;border:1px solid #d9e4e1;border-radius:6px;color:#4c6f66;background:#fff}
+.copy-results:hover{background:#f2f7f5}
+#activity-result-list{max-height:min(380px,46vh);overflow-y:auto;padding-right:4px;display:grid;grid-template-columns:repeat(auto-fill,minmax(128px,1fr));gap:6px;align-content:start}
+.account-result{margin-bottom:0;justify-content:center;padding:8px 10px;overflow-wrap:anywhere;text-align:center}
+.dialog-footnote{margin:16px 0 0;line-height:1.7;word-break:break-word;text-align:justify}
+@media(max-width:760px){.result-summary{gap:6px;font-size:11px}#activity-result-list{grid-template-columns:repeat(auto-fill,minmax(104px,1fr))}.account-result{padding:7px 9px}.dialog-footnote{font-size:10px}}
+
+.activity-avatar{background:#8a5b1f}
+
+.activity-avatar{font-size:20px;display:grid;place-items:center;line-height:1}
