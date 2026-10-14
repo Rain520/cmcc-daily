@@ -6,6 +6,8 @@
 
 发布：`docker buildx build --platform linux/amd64,linux/arm64 --provenance=false --sbom=false -t rain5201/cmcc-daily:1.6.7 -t rain5201/cmcc-daily:latest --push .` 推送成功，两个标签指向同一索引 `sha256:6f32710e…`（AMD64 清单 `sha256:63820cdc…`，ARM64 清单 `sha256:77732b06…`）。第一次推送时 `auth.docker.io` 直连被重置（`failed to fetch oauth token ... connection forcibly closed`），设置 `HTTP_PROXY`/`HTTPS_PROXY=http://127.0.0.1:7890` 后成功；这条经验已写进 `docs/PUBLISHING.md`。发布后 `docker pull rain5201/cmcc-daily:1.6.7` 拉到的镜像 ID 与该索引摘要一致，并对该镜像运行容器冒烟测试（通过）。
 
+本机正式实例（`cmcc-local` 项目，127.0.0.1:18080，1 个账号 15 条记录）随后升级到该镜像：升级前把数据卷快照到 `test-results/backup-before-1.6.7/cmcc-data-before-1.6.7.tgz`，`.env.local` 的 `CMCC_IMAGE` 改为 `rain5201/cmcc-daily:1.6.7` 后 `docker compose -p cmcc-local -f compose.image.yaml --env-file .env --env-file .env.local up -d`（数据卷 `cmcc-local_cmcc-data` 不变）。升级后容器镜像摘要 `sha256:6f32710e…` 与发布索引一致、健康检查 200、账号与执行记录数不变、页面版本显示 1.6.7、端口仍只绑 127.0.0.1:18080。审核预览容器（`cmcc-preview` 项目）在发布后已 `down`（保留虚构数据卷，需要时 `docker compose -f compose.preview.yaml up -d` 即可再起）。
+
 ## 审核预览里发现的三处界面问题（2026-10-15）
 
 审核 1.6.7 预览时发现并修好三处，都是「秒杀任务」接进来后暴露的：
