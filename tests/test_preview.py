@@ -64,12 +64,7 @@ class PreviewTests(unittest.TestCase):
         self.assertEqual(len(runs), 12, runs)
         self.assertEqual({item["status"] for item in runs}, {"success", "failed", "partial", "running", "queued"})
         self.assertEqual((self.data / preview.MARKER_NAME).read_text(encoding="utf-8"), preview.MARKER_TEXT)
-        # 示例里带一个秒杀活动，审核「秒杀任务」页时不用自己新建。
-        activity = store.activities()[0]
-        self.assertEqual((activity["name"], activity["time"]), ("示例 · 假期抢券", "12:00:00"))
-        self.assertEqual({key: activity["config"][key] for key in ("lead", "interval", "max_attempts")},
-                         {"lead": 3, "interval": 0.5, "max_attempts": 40})
-        self.assertEqual(len(activity["accounts"]), len(preview.STATUS_FIXTURES))
+
         # 再次启动只读标记，不会重复写入示例数据。
         self.prepare()
         self.assertEqual(len(Store(self.data).accounts()), len(preview.STATUS_FIXTURES))
@@ -113,6 +108,19 @@ class PreviewTests(unittest.TestCase):
         """线程退出后再清理临时目录，否则 Windows 上 SQLite 文件仍被占用。"""
         self.manager.stop_event.set()
         self.manager.join(timeout=15)
+
+    def test_builtin_activity_comes_from_the_backend(self):
+        """秒杀活动清单由后端预置：预览启动后自动出现，网页上不能新增。"""
+        self.build()
+        activities = self.store.activities()
+        self.assertEqual([item["id"] for item in activities], ["seckill-daily"])
+        activity = activities[0]
+        self.assertEqual({key: activity["config"][key] for key in ("lead", "interval", "max_attempts")},
+                         {"lead": 5, "interval": 0.35, "max_attempts": 120})
+        self.assertFalse(activity["enabled"], "内置活动默认不启用，等用户自己打开")
+        self.assertEqual(len(self.store.activity_account_ids()), len(preview.STATUS_FIXTURES))
+        payload = self.client.get("/api/activities").get_json()["activities"][0]
+        self.assertTrue(payload["description"])
 
     def test_scheduler_started_after_install_keeps_fixtures_running(self):
         """调度线程必须在 install() 之后启动，否则示例里的「正在执行」会被 recover 改成中断。"""

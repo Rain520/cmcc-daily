@@ -287,24 +287,27 @@ class HistoryViewTests(unittest.TestCase):
 
     def test_activities_view_holds_activity_content(self):
         """秒杀任务以活动为主体：独立视图、卡片网格与添加入口。"""
-        view_elements = ("activities-view", "activity-grid", "activity-count", "add-activity",
-                         "empty-activities", "empty-add-activity")
+        view_elements = ("activities-view", "activity-grid", "activity-count", "activity-note")
         for element in view_elements:
             self.assertIn(element, self.paths)
             ancestors = self.paths[element]
             self.assertIn("app-view", ancestors, element)
             if element != "activities-view":
                 self.assertIn("activities-view", ancestors, element)
-        for element in ("activity-dialog", "activity-form",
-                        "activity-weekdays", "activity-delete-dialog",
-                        "activity-result-dialog", "activity-result-list",
+        for element in ("activity-dialog", "activity-form", "activity-description",
+                        "activity-weekdays", "activity-result-dialog", "activity-result-list",
                         "activity-result-summary"):
             self.assertIn(element, self.paths)
+        # 活动清单由后端维护：网页上没有新增与删除入口
+        self.assertNotIn('id="add-activity"', self.html)
+        self.assertNotIn("activity-delete-dialog", self.html)
+        self.assertNotIn("deletingActivity", self.script)
+        self.assertIn("由服务端配置", self.html)
         self.assertIn('href="#activities" data-view="activities"', self.html)
         self.assertIn("function renderActivities(", self.script)
         self.assertIn("async function loadActivities(", self.script)
         self.assertIn('api("/activities"', self.script)
-        self.assertIn("`/activities/${state.deletingActivity.id}`", self.script)
+
         self.assertIn("假期秒杀", self.html)
         self.assertIn("activity-avatar", self.style)
 
@@ -318,6 +321,17 @@ class HistoryViewTests(unittest.TestCase):
         # 账号卡片按后端返回的 tasks 渲染，未知任务要有兜底，不能再出现 schedules[entry.task] 为 undefined。
         self.assertIn("schedules[entry.task] || defaultSchedule", self.script)
         self.assertIn("for (const task of taskKeys)", self.script)
+
+    def test_log_dialog_copies_the_log(self):
+        """所有日志都能一键复制；局域网 http 访问时退回 execCommand。"""
+        self.assertIn('id="copy-log"', self.html)
+        self.assertIn('id="log-content"', self.html)
+        self.assertIn("function copyLog(", self.script)
+        self.assertIn("async function copyText(", self.script)
+        self.assertIn('$("#copy-log").addEventListener("click", copyLog)', self.script)
+        self.assertIn("navigator.clipboard.writeText", self.script)
+        self.assertIn("execCommand(\"copy\")", self.script)
+        self.assertIn('$("#copy-log").hidden = !log.trim()', self.script)
 
     def test_activity_result_dialog_keeps_the_footnote_clear_of_the_buttons(self):
         """结果弹窗的小字说明要有自己的上间距，列表高度随窗口收敛。"""
@@ -372,8 +386,10 @@ class HistoryViewTests(unittest.TestCase):
         self.assertIn('name="mode" value="all"', self.html)
         self.assertIn('name="mode" value="pending"', self.html)
         self.assertIn("重复执行（最近一次已成功）", self.script)
-        self.assertIn('part.state === "success" && part.code === "skipped"', self.script)
+        self.assertIn('part.code === "skipped" || part.code === "unavailable"', self.script)
+        self.assertIn('partState = benign ? "success" : part.state', self.script, "良性跳过要显示成绿色")
         self.assertIn("部分跳过", self.script)
+        self.assertIn("暂时无库存", self.script)
         self.assertIn("已执行成功，本次跳过", self.script)
         self.assertIn("$('#run-all-form').addEventListener(\"submit\"".replace("'", '"'), self.script)
         self.assertIn('.run-all-item{', self.style)

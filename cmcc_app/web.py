@@ -15,6 +15,7 @@ from flask import Flask, Response, jsonify, render_template, request, session
 from werkzeug.exceptions import HTTPException
 
 from . import __version__
+from .activities import ACTIVITIES, definitions as activity_definitions
 from .auth import AuthStore
 from .account_status import summaries
 from .backup import (MAX_FILE_BYTES, apply_payload, build_payload, check_passphrase,
@@ -22,7 +23,7 @@ from .backup import (MAX_FILE_BYTES, apply_payload, build_payload, check_passphr
 from .logging_utils import redact
 from .models import (DATE_PATTERN, RUN_SOURCES, RUN_STATUSES, TASKS, TASK_ORDER, Store,
                      normalize_account, public_account, public_activity, runnable_tasks,
-                     normalize_activity)
+                     activity_settings)
 from .runner import Manager
 from .storage import account_key, atomic_json
 
@@ -52,6 +53,13 @@ def create_app(settings, start_manager=False):
         SESSION_COOKIE_SAMESITE="Strict", SESSION_COOKIE_SECURE=settings.secure_cookie,
         PERMANENT_SESSION_LIFETIME=timedelta(hours=12), SESSION_REFRESH_EACH_REQUEST=False,
     )
+    # 秒杀活动清单只由后端维护（见 cmcc_app/activities.py）：启动时同步进数据库，
+    # 网页上不提供新增/删除，只能改执行参数。
+    sync = store.sync_activities(ACTIVITIES, settings.timezone)
+    if any(sync.values()):
+        logging.getLogger("cmcc_app").info(
+            "秒杀活动清单已同步：新增 %s，更新 %s，下线 %s，保留 %s",
+            len(sync["added"]), len(sync["updated"]), len(sync["removed"]), len(sync["kept"]))
     manager = Manager(store, settings)
     app.extensions.update(cmcc_store=store, cmcc_manager=manager, cmcc_settings=settings,
                           cmcc_auth=auth)
@@ -219,19 +227,21 @@ def create_app(settings, start_manager=False):
     @authenticated
     def activities():
         items = store.activities()
-        results = store.latest_seckill_results({account_id for item in items for account_id in item["accounts"]})
+        catalog = activity_definitions()
+        account_ids = store.activity_account_ids()  # 全部账号参与
+        results = store.latest_seckill_results(set(account_ids))
         return jsonify(activities=[{**public_activity(item),
-                                   "results": {account_id: results.get(account_id) for account_id in item["accounts"]},
+                                   "description": catalog.get(item["id"], {}).get("description", ""),
+                                   "account_count": len(account_ids),
+                                   "results": {account_id: results.get(account_id) for account_id in account_ids},
                                    "pending": store.pending_runs_for_activity_accounts(item)}
                                   for item in items])
 
     @app.post("/api/activities")
     @authenticated
     def add_activity():
-        activity = normalize_activity(body(), accounts=store.accounts(),
-                                      timezone_name=settings.timezone)
-        store.save_activity(activity, settings.timezone)
-        return jsonify(activity=public_activity(activity)), 201
+        # 秒杀接口各不相同，活动清单只在后端维护，网页上不能新增。
+        raise ValueError("活动清单由服务端维护，不能在网页新增；新增活动请在后端 cmcc_app/activities.py 里配置")
 
     @app.put("/api/activities/<activity_id>")
     @authenticated
@@ -239,8 +249,7 @@ def create_app(settings, start_manager=False):
         old = store.activity(activity_id)
         if not old:
             return jsonify(error="活动不存在"), 404
-        activity = normalize_activity(body(), old, accounts=store.accounts(),
-                                      timezone_name=settings.timezone)
+        activity = activity_settings(body(), old, settings.timezone)
         store.save_activity(activity, settings.timezone)
         return jsonify(activity=public_activity(activity))
 
@@ -249,8 +258,8 @@ def create_app(settings, start_manager=False):
     def delete_activity(activity_id):
         if not store.activity(activity_id):
             return jsonify(error="活动不存在"), 404
-        store.delete_activity(activity_id)
-        return jsonify(ok=True)
+        # 清单由后端维护：删掉下次启动也会同步回来，直接拒绝更不容易误解。
+        raise ValueError("活动由服务端清单维护，不能在网页删除；下线请从后端清单中移除")
 
     @app.post("/api/activities/<activity_id>/run")
     @authenticated
@@ -262,7 +271,7 @@ def create_app(settings, start_manager=False):
         if not_ready := scheduler_ready():
             return not_ready
         queued, skipped = [], []
-        for account_id in activity["accounts"]:
+        for account_id in store.activity_account_ids():  # 全部账号参与
             account = store.account(account_id)
             if account is None:
                 continue

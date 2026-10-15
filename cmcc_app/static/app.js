@@ -3,7 +3,7 @@ const $ = (selector) => document.querySelector(selector);
 const state = { csrf: "", timezone: "Asia/Shanghai", accounts: [], runs: [], editing: null, runAccount: null, logId: null, deleting: null, authenticated: false,
   runsTotal: 0, runsPages: 1, runsPage: 1, runsPageSize: 20, runsLatest: null, runsCounts: {},
   runsScanned: null, selected: new Set(), runsLoading: false, runsLoaded: false, pendingAccounts: new Set(), pendingTasks: new Set(),
-  accountQuery: "", accountStatus: "", rerunTask: null, activities: [], editingActivity: null, deletingActivity: null };
+  accountQuery: "", accountStatus: "", rerunTask: null, activities: [], editingActivity: null };
 const weekdayFullLabels = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"];
 const labels = { queued: "等待执行", running: "正在执行", success: "执行完成", partial: "部分成功", failed: "执行失败", interrupted: "已停止" };
 const tasks = { sign: "每日签到", wed: "周三拼图", rate: "评价有礼", fee: "话费查询", seckill: "假期秒杀" };
@@ -254,10 +254,11 @@ function renderAccounts() {
         const parts = node("div", undefined, "task-parts");
         for (const part of entry.parts) {
           const name = {claim: "累计奖励", tasks: "AI 豆", games: "拓展活动"}[part.key];
-          // 需要真实操作而跳过的任务属于正常情况，用中性的「部分跳过」而不是黄色告警。
-          const skipped = part.state === "success" && part.code === "skipped";
-          const partState = skipped ? "skipped" : part.state;
-          const label = skipped ? "部分跳过" : taskLabels[part.state] || "未执行";
+          // 需要真实操作、库存不足这类「再做一次也不会变」的结果按正常显示：绿色标签，不计入未完成。
+          const benign = part.state === "success" && (part.code === "skipped" || part.code === "unavailable");
+          const partState = benign ? "success" : part.state;
+          const label = benign ? (part.code === "unavailable" ? "暂时无库存" : "部分跳过")
+                              : taskLabels[part.state] || "未执行";
           const tag = node("span", `${taskIcons[partState] || "○"} ${name} · ${label}`, `task-part ${partState}`);
           tag.title = part.detail;
           parts.append(tag);
@@ -482,13 +483,13 @@ async function loadActivities(silent = false) {
 function renderActivities() {
   const grid = $("#activity-grid");
   grid.replaceChildren();
-  $("#empty-activities").hidden = state.activities.length > 0;
   $("#activity-count").textContent = state.activities.length;
   for (const activity of state.activities) {
     const card = node("article", undefined, "account-card");
     const top = node("div", undefined, "account-top");
     const title = node("div", undefined, "account-title");
-    title.append(node("h3", activity.name), node("span", `假期秒杀 · ${activity.account_count} 个账号`, "account-phone"));
+    title.append(node("h3", activity.name),
+                  node("span", `${tasks[activity.kind] || activity.kind} · ${activity.account_count} 个账号`, "account-phone"));
     top.append(node("span", "◈", "avatar activity-avatar"), title,
                node("span", activity.enabled ? "已启用" : "已停用", `badge ${activity.enabled ? "enabled" : ""}`));
     const config = node("div", undefined, "schedule-info");
@@ -508,9 +509,10 @@ function renderActivities() {
     const actions = node("div", undefined, "card-actions");
     actions.append(button("立即执行  →", "button primary", () => runActivity(activity)),
                    button("账号结果", "button secondary", () => openActivityResult(activity)),
-                   button("编辑", "button secondary", () => openActivity(activity)),
-                   button("删除", "text-button delete-button", () => openDeleteActivity(activity)));
-    card.append(top, config, days_line, summary, next, actions);
+                   button("配置", "button secondary", () => openActivity(activity)));
+    card.append(top, config, days_line, summary, next);
+    if (activity.description) card.append(node("p", activity.description, "activity-description"));
+    card.append(actions);
     grid.append(card);
   }
 }
@@ -563,53 +565,64 @@ function openActivityResult(activity) {
   }
   $("#activity-result-dialog").showModal();
 }
+async function copyText(value, message) {
+  const text = value == null ? "" : String(value);
+  if (!text.trim()) { toast("暂时没有可复制的内容", true); return; }
+  try {
+    // 通过 https 或 localhost 打开时可直接用剪贴板 API。
+    await navigator.clipboard.writeText(text);
+  } catch (error) {
+    // 局域网 http:// 访问时剪贴板 API 不可用，退回选中 + execCommand。
+    const area = document.createElement("textarea");
+    area.value = text;
+    area.style.position = "fixed";
+    area.style.top = "-1000px";
+    document.body.append(area);
+    area.select();
+    area.setSelectionRange(0, text.length);
+    let copied = false;
+    try { copied = document.execCommand("copy"); } catch (fallbackError) { copied = false; }
+    area.remove();
+    if (!copied) { toast("复制失败，请手动选中文本复制", true); return; }
+  }
+  toast(message);
+}
 async function copyActivityResult(rows) {
   const names = tone => rows.filter(row => row.tone === tone).map(row => row.account?.name || "未知账号");
   const lines = [`成功（${names("success").length}）`, ...names("success"),
                  `失败（${names("failed").length}）`, ...names("failed")];
-  const text = lines.join("\n");
-  try {
-    await navigator.clipboard.writeText(text);
-    toast("已复制成功与失败的账号名单");
-  } catch (error) {
-    const area = document.createElement("textarea");
-    area.value = text;
-    document.body.append(area);
-    area.select();
-    document.execCommand("copy");
-    area.remove();
-    toast("已复制成功与失败的账号名单");
-  }
+  await copyText(lines.join("\n"), "已复制成功与失败的账号名单");
+}
+function copyLog() {
+  return copyText($("#log-content").textContent, "已复制这段执行日志");
 }
 function readActivityForm(form) {
+  // 活动清单由服务端维护，这里只提交可改的执行参数（名称、类型、参与账号都由后端决定）。
   return {
-    name: form.elements.name.value,
     time: form.elements.time.value,
     lead: Number(form.elements.lead.value),
     interval: Number(form.elements.interval.value),
     max_attempts: Number(form.elements.max_attempts.value),
     weekdays: Array.from(document.querySelectorAll('#activity-weekdays input:checked')).map(box => Number(box.dataset.day)),
-    accounts: [],
     enabled: form.elements.enabled.checked,
   };
 }
 function openActivity(activity) {
-  state.editingActivity = activity || null;
+  state.editingActivity = activity;
   const form = $("#activity-form");
   form.reset();
   $("#activity-error").textContent = "";
-  $("#activity-dialog-title").textContent = activity ? "编辑活动" : "添加活动";
-  if (activity) {
-    form.elements.name.value = activity.name;
-    form.elements.time.value = activity.time;
-    form.elements.lead.value = activity.config.lead;
-    form.elements.interval.value = activity.config.interval;
-    form.elements.max_attempts.value = activity.config.max_attempts;
-    form.elements.enabled.checked = activity.enabled;
-  }
+  $("#activity-dialog-title").textContent = activity.name;
+  $("#activity-description").textContent = activity.description || "";
+  form.elements.name.value = activity.name;
+  form.elements.time.value = activity.time;
+  form.elements.lead.value = activity.config.lead;
+  form.elements.interval.value = activity.config.interval;
+  form.elements.max_attempts.value = activity.config.max_attempts;
+  form.elements.enabled.checked = activity.enabled;
   const weekdays = $("#activity-weekdays");
   weekdays.replaceChildren();
-  const selected = activity ? (activity.weekdays || [0,1,2,3,4,5,6]) : [0,1,2,3,4,5,6];
+  const selected = activity.weekdays || [0,1,2,3,4,5,6];
   for (let day = 0; day < 7; day += 1) {
     const wrap = node("label", undefined, "checkbox");
     const box = node("input");
@@ -634,38 +647,17 @@ async function runActivity(activity) {
     await loadActivities(true);
   } catch (error) { toast(error.message, true); }
 }
-function openDeleteActivity(activity) {
-  state.deletingActivity = activity;
-  $("#delete-activity-name").textContent = `确定删除「${activity.name}」？`;
-  $("#delete-activity-error").textContent = "";
-  $("#activity-delete-dialog").showModal();
-}
-$("#add-activity").addEventListener("click", () => openActivity());
-$("#empty-add-activity").addEventListener("click", () => openActivity());
 $("#activity-form").addEventListener("submit", event => {
   event.preventDefault();
   const form = event.currentTarget;
   submit(form, "#activity-error", async () => {
-    const payload = readActivityForm(form);
-    if (state.editingActivity) await api(`/activities/${state.editingActivity.id}`, "PUT", payload);
-    else await api("/activities", "POST", payload);
+    await api(`/activities/${state.editingActivity.id}`, "PUT", readActivityForm(form));
     $("#activity-dialog").close();
     form.reset();
-    toast("活动已保存");
+    toast("设置已保存");
     await loadActivities(true);
     await refresh();
   });
-});
-$("#confirm-delete-activity").addEventListener("click", async () => {
-  const control = $("#confirm-delete-activity");
-  control.disabled = true;
-  try {
-    await api(`/activities/${state.deletingActivity.id}`, "DELETE");
-    $("#activity-delete-dialog").close();
-    toast("活动已删除");
-    await loadActivities(true);
-  } catch (error) { $("#delete-activity-error").textContent = error.message; }
-  finally { control.disabled = false; }
 });
 function taskMark(account, task) {
   const entry = runTaskEntry(account, task);
@@ -827,6 +819,7 @@ async function openLog(runId) {
   $("#log-content").textContent = "正在读取日志…";
   $("#log-title").textContent = "执行日志";
   $("#log-status").textContent = "";
+  $("#copy-log").hidden = true;
   $("#cancel-run").hidden = true;
   $("#log-dialog").showModal();
   try { await updateLog(); } catch (error) { $("#log-content").textContent = error.message; }
@@ -837,7 +830,9 @@ async function updateLog() {
   if (state.logId !== selectedId) return;
   $("#log-title").textContent = `${result.run.account_name} · ${tasks[result.run.task]}`;
   $("#log-status").textContent = `${labels[result.run.status]}${result.run.message ? " · " + result.run.message : ""}`;
-  $("#log-content").textContent = result.log || "任务已进入队列，执行后会在这里显示日志。";
+  const log = result.log || "";
+  $("#log-content").textContent = log || "任务已进入队列，执行后会在这里显示日志。";
+  $("#copy-log").hidden = !log.trim();
   $("#cancel-run").hidden = !isPending(result.run);
 }
 function openDelete(account) {
@@ -1236,6 +1231,7 @@ $("#no-match-clear").addEventListener("click", () => { state.accountStatus = "";
 $("#add-account").addEventListener("click", () => openAccount());
 $("#empty-add").addEventListener("click", () => openAccount());
 $("#refresh").addEventListener("click", () => refresh());
+$("#copy-log").addEventListener("click", copyLog);
 document.querySelectorAll("[data-close]").forEach(control => control.addEventListener("click", () => document.getElementById(control.dataset.close).close()));
 $("#account-dialog").addEventListener("close", () => { $("#account-form").reset(); });
 $("#log-dialog").addEventListener("close", () => { state.logId = null; });

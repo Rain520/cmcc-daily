@@ -24,7 +24,7 @@ import threading
 from flask import jsonify, request
 
 from . import __version__
-from .models import Store, normalize_account, normalize_activity, utcnow
+from .models import Store, normalize_account, utcnow
 
 ENV_FLAG = "CMCC_PREVIEW"
 MARKER_NAME = "synthetic-preview.txt"
@@ -143,6 +143,10 @@ def seed_status_demo(store, root):
                               for key in ("claim", "tasks", "games")})
                 if health == "warning":
                     parts["games"] = {"state": "failed", "reason": "network"}
+                elif health == "normal":
+                    # 演示「再做一次也不会变」的正常结果：绿色标签，不影响整次状态。
+                    parts["tasks"] = {"state": "success", "reason": "skipped"}
+                    parts["games"] = {"state": "success", "reason": "unavailable"}
             result = {"version": 1, "state": status, "reason": reason, "auth": auth, "parts": parts}
             run_id = store.enqueue(account["id"], task)
             store.finish(run_id, status, 1 if status == "failed" else 0, "虚构预览记录", result)
@@ -162,16 +166,11 @@ def seed_status_demo(store, root):
                 conn.execute("UPDATE runs SET status=?,started_at=? WHERE id=?", (health, started, run_id))
             (root / "logs" / f"{run_id}.log").write_text("[审核预览] 模拟执行状态，不会发送真实请求。", encoding="utf-8")
             frozen.append({"id": run_id, "status": health, "started_at": started})
-    # 一个示例秒杀活动：预览不跑定时计划，点「立即执行」即可看到并行抢购的模拟结果。
-    activity = normalize_activity({"name": "示例 · 假期抢券", "kind": "seckill", "time": "12:00:00",
-                                   "lead": 3, "interval": 0.5, "max_attempts": 40,
-                                   "weekdays": list(range(7)), "accounts": [], "enabled": True},
-                                  accounts=store.accounts(), timezone_name="Asia/Shanghai")
-    store.save_activity(activity, "Asia/Shanghai")
     # 这两条记录固定展示「正在执行 / 排队中」，预览运行时不会真的取走它们。
     (root / FIXTURE_NAME).write_text(
         json.dumps({"runs": frozen}, ensure_ascii=False, indent=2), encoding="utf-8")
-    print("已生成 6 个虚构账号与 1 个示例秒杀活动，覆盖全部账号状态；其中 2 条排队记录会固定保留。")
+    print("已生成 6 个虚构账号，覆盖全部账号状态；其中 2 条排队记录会固定保留。"
+          "秒杀活动清单由后端预置，启动时会自动同步。")
 
 
 def prepare(data_dir):

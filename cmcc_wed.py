@@ -312,6 +312,10 @@ def receive_ready(s: requests.Session, referer: str, state: dict, lines: list[st
                          + (f"，{sub}" if sub else "") + "）")
         elif "已领取" in msg:
             lines.append(f"[领取] {label} 已领取过")
+        elif task_result.benign(msg):
+            # 库存不足／已抢完这类结果再试也不会变：按正常处理，不标黄也不重跑。
+            task_result.mark("success", "unavailable")
+            lines.append(f"[领取] {label} 暂未领到: {msg}（属正常，稍后再试）")
         else:
             task_result.mark("partial", "business")
             lines.append(f"[领取] {label} 领取失败: {msg or resp.get('code')}")

@@ -1,5 +1,28 @@
 # 验证记录
 
+## 1.6.8：活动清单改为服务端维护、日志可复制（2026-10-15）
+
+改动：审核 1.6.7 时发现两处问题，都按「活动清单由后端维护」的思路重做。
+
+1. **网页新增活动会报「活动类型不支持」**：网页表单没有提交 `kind`，而后端 `normalize_activity` 要求它必须在 `ACTIVITY_KINDS` 里，于是保存直接 400；而且每个秒杀活动的接口本来就不同，不适合让用户在网页上「造活动」。现在新增 `cmcc_app/activities.py`（后端清单：id／kind／名称／说明／默认参数），`Store.sync_activities()` 在应用启动时同步进数据库：补上缺失的、刷新名称与说明、保留用户改过的执行参数、把清单里已移除的活动下线（还有排队中的秒杀任务时先保留，任务结束再删）。网页上 `POST /api/activities` 与 `DELETE /api/activities/<id>` 都返回 400 并说明「由服务端维护」；`PUT` 走新的 `activity_settings()`，只接受「是否启用、开抢时间、提前量／重试间隔／最大尝试次数、活动日」，提交里的 name／kind／accounts 一律忽略。参与账号固定为「当前全部账号」：`Store.activity_account_ids()` 每次取实时账号列表，调度与手动执行都用它，新增账号无需改配置。
+2. **日志没有复制入口**：日志弹窗工具栏新增「复制日志」，抽了共用的 `copyText()`（优先 `navigator.clipboard`，局域网 http 访问没有剪贴板 API 时退回选中 + `execCommand`，都失败才提示手动复制）；原「复制结果」也改用它。活动卡片去掉删除按钮与空状态，配置弹窗里的活动名改为只读显示并展示后端写的活动说明。
+
+单元测试 `python -m unittest discover -s tests -q` 共 180 项通过（4 项 Linux 专用测试在 Windows 跳过），新增 `tests/test_activities.py`（清单格式、同步新增/保留用户设置/刷新账号/下线与保留待执行的活动、`activity_settings` 只吃可改字段并拒绝非法值、逐字段校验助手）12 项，改写 `tests/test_web.py` 的活动用例（网页不能新增/删除、PUT 改名与改类型无效、时间与参数原样保存、手动执行为全部账号排队），`tests/test_history.py` 断言网页已无新增/删除入口、日志弹窗必须有复制按钮与兜底逻辑，`tests/test_preview.py` 改为断言内置活动由后端同步而来。`node --check cmcc_app/static/app.js` 通过；`docker build -t cmcc-daily:test .` 后 `python tests/container_smoke.py` 通过。
+
+真实运行验证（本机 Docker 审核预览 0.0.0.0:18081，模拟执行）：启动日志显示「秒杀活动清单已同步：新增 1，更新 0，下线 1，保留 0」——旧版本里手工建的那个示例活动被新清单正确清掉。页面显示一个卡片「签到有礼 · 假期秒杀」（已停用、6 个账号、含后端说明），页面上没有「添加活动」按钮；「配置」弹窗里活动名是只读的，把开抢时间改成 12:34:56、提前量 2 秒、间隔 0.5 秒、最多 60 发并勾选启用后保存，卡片立刻变成「已启用 · 12:34:56（提前 2 秒 · 每 0.5 秒一发，最多 60 发）· 下次执行 10/15 12:34」。日志弹窗的「复制日志」按钮可见，点击后读回剪贴板内容与日志正文完全一致（账号卡片与执行记录两处入口都测过）。
+
+本机正式实例（`cmcc-local` 项目，127.0.0.1:18080，1 个账号 15 条记录、0 个活动）随后更新到本地构建的 1.6.8：`docker build -t rain5201/cmcc-daily:1.6.8 .` 后把 `.env.local` 的 `CMCC_IMAGE` 改成该标签，`docker compose -p cmcc-local -f compose.image.yaml --env-file .env --env-file .env.local up -d`（无 `pull_policy`，直接用本地镜像；数据卷 `cmcc-local_cmcc-data` 不变）。更新前快照到 `test-results/backup-before-1.6.8/cmcc-data-before-1.6.8.tgz`。更新后容器镜像摘要 `sha256:8b44f91c…` 与本地构建一致、健康检查 200、账号与记录数不变、启动日志「秒杀活动清单已同步：新增 1，更新 0，下线 0，保留 0」、内置活动「签到有礼 · 假期秒杀」已出现（默认停用、参与账号 1 个）、页面版本为 1.6.8。
+
+### 「再做一次也不会变」的结果按正常处理（2026-10-15 同日追加）
+
+改动：审核时发现 AI 豆「5 个待办完成 3 个、2 个需真实操作」被标成黄色「部分成功」，拼图兑奖「奖品库存不足」也被标成失败——这两类结果重试也不会变，却让账号卡片一直告警、还会被「只执行未完成和出错的任务」反复重跑。现在在 `cmcc_app/results.py` 里加了良性提示判断（`benign()`：库存不足／已抢完／已领取／已达上限／未到窗口／需要真实操作／第三方 App／公众号／外部合作等）和新的原因码 `unavailable`（「奖品暂时没有库存或名额，属正常情况」），并落到具体链路上：AI 豆补领与领奖、代币任务、抽奖、拓展活动打卡、周三拼图兑奖——提示命中良性关键字时记为 success（原因 skipped／unavailable），只有真正的接口异常／网络错误／库存充足却领取失败才继续标 partial。前端的子结果标签改为绿色：`skipped` 显示「部分跳过」、`unavailable` 显示「暂时无库存」，鼠标悬停能看到原因。因为整次状态是 success，`select_tasks` 的 pending（「只执行未完成和出错的」）自然不再选它重跑。
+
+单元测试 `python -m unittest discover -s tests -q` 共 184 项通过（4 项 Linux 专用测试在 Windows 跳过），新增：`benign()` 命中与不命中各若干条、AI 豆领奖「库存不足」+ 任务「需要真实操作」时整段仍是 success（reason 为 skipped／unavailable）、拼图兑奖「库存不足」不算失败而「内部错误」仍算 partial、以及网页层「良性结果不列入 pending 重跑范围」（其余从未执行过的任务照常提交）。`node --check cmcc_app/static/app.js` 通过；`docker build -t cmcc-daily:test .` 后 `python tests/container_smoke.py` 通过。
+
+真实运行验证（本机 Docker 审核预览，模拟数据）：示例账号卡片上「每日签到」为绿色「✓ 今日已完成」，子标签「✓ 积累奖励 · 已完成」「✓ AI 豆 · 部分跳过」「✓ 拓展活动 · 暂时无库存」全部为绿色，悬停分别显示「部分步骤需要真实操作，已跳过」「奖品暂时没有库存或名额，属正常情况」；同一个预览里「示例 · 部分异常」账号仍是黄色「! 部分成功」（拓展活动真失败），说明真正的失败照旧告警。
+
+本机正式实例随后重建为同一份 1.6.8 本地镜像（`sha256:379a6806…`），数据卷不变（1 个账号、16 条记录、1 个内置活动），健康检查 200、页面版本 1.6.8；历史记录里的黄色不会被改写，下一次执行后按新规则判定。发布后从 Docker Hub 拉取并验证：`1.6.8` 与 `latest` 同指索引 `sha256:f8fda4288d554de2eff1fad3c90d7fc8922b35b713d29b4dcc240f7808d38134`，含 AMD64 `sha256:3927eba2daa0da3506e2eb1d685fdcad8acc4056f321246faabe9c148d2559f9`、ARM64 `sha256:04673d2f97184f851302a75423ebf183ab804999664d109dc56fb6801a83d4cb`；按远端镜像运行容器冒烟测试通过。
+
 ## 1.6.7 发布（2026-10-15）
 
 发布前：`python -m unittest discover -s tests -q` 共 168 项通过（4 项 Linux 专用测试在 Windows 跳过）；`docker build -t cmcc-daily:test .` 后 `python tests/container_smoke.py` 通过（含审核预览用例）；在本机 Docker 审核预览（`cmcc-preview-cmcc-1`，0.0.0.0:18081）里用浏览器逐页自检账号总览、秒杀任务页（含示例活动）、秒杀结果弹窗与一键执行弹窗，桌面与 390×844 手机宽度各看一遍。

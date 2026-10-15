@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo
 import requests
 import cmcc_sign
 import cmcc_extra
+import cmcc_wed
 import cmcc_rate
 from cmcc_app import results
 from cmcc_app.account_status import summaries
@@ -293,6 +294,62 @@ class StructuredResultTests(unittest.TestCase):
             code = cmcc_rate.run(SimpleNamespace(phone="13800000011"), False, "example")
         self.assertEqual(code, 0)
         self.assertEqual(results.finish(code)["state"], "success")
+
+    def test_benign_message_classification(self):
+        """库存不足、需要真实操作这类提示说明「再做一次也不会变」。"""
+        for message in ("奖品库存不足", "该奖品已抢完", "今日次数已达上限", "需要真实操作，请在 App 内完成",
+                        "未到窗口（周6 12:00 起）", "需关注公众号"):
+            with self.subTest(message=message):
+                self.assertTrue(results.benign(message))
+        for message in ("", None, "网络请求失败", "系统繁忙，请稍后再试", "内部错误 -1"):
+            with self.subTest(message=message):
+                self.assertFalse(results.benign(message))
+
+    def test_ai_bean_award_without_stock_stays_success(self):
+        """AI 豆里只有「第三方 App/真实操作」类做不了：整段仍是已完成，不标黄。"""
+        todo = {"taskId": "t1", "taskName": "示例任务", "status": 0, "taskClasifiName": "日常"}
+        skip = {"taskId": "t2", "taskName": "第三方任务", "status": 0, "taskClasifiName": "日常"}
+        api_responses = [
+            {"code": "SUCCESS", "data": {"tasks": [todo, skip]}},              # taskList
+            {"code": "SUCCESS", "data": {"taskType": "scan", "scanTime": 1}},  # taskInfo(t1)
+            {"code": "FAIL", "msg": "奖品库存不足"},                            # getTaskAward(t1)
+            {"code": "SUCCESS", "data": {"taskType": "scan", "scanTime": 1}},  # taskInfo(t2)
+        ]
+        session = Mock()
+        session.post.side_effect = [
+            Mock(json=lambda: {"code": "SUCCESS"}),                            # finishTask(t1)
+            Mock(json=lambda: {"code": "FAIL", "msg": "需要真实操作，请在 App 内完成"}),  # finishTask(t2)
+        ]
+        results.begin("tasks")
+        with patch.object(cmcc_extra, "api_call", side_effect=api_responses), \
+                patch.object(cmcc_extra.time, "sleep"):
+            text = cmcc_extra.run_mark_tasks(session, "https://example.com", Mock(), False)
+        report = results.finish(0)
+        self.assertIn("完成 1 个", text)
+        self.assertIn("跳过 1 个", text)
+        self.assertEqual(report["state"], "success", report)
+        self.assertEqual(report["parts"]["tasks"]["state"], "success")
+        self.assertIn(report["parts"]["tasks"]["reason"], ("skipped", "unavailable"))
+
+    def test_puzzle_prize_without_stock_is_not_a_failure(self):
+        """拼图兑奖「库存不足」不算失败；库存充足却报错才算失败。"""
+        complete = {"piece1": "1", "piece2": "1", "piece3": "1", "piece4": "1"}
+        for code, message, expected in (("FAIL", "奖品库存不足", ("success", "unavailable")),
+                                        ("FAIL", "内部错误", ("partial", "partial"))):
+            with self.subTest(message=message):
+                session = Mock()
+                session.post.return_value = Mock(json=lambda code=code, message=message:
+                                                 {"code": code, "msg": message})
+                results.start("wed", {})
+                results.begin("main")
+                lines = []
+                with patch.object(cmcc_wed, "api_headers", return_value={}), \
+                        patch.object(cmcc_wed.time, "sleep"):
+                    cmcc_wed.receive_ready(session, "https://example.com", {"pictureList": {"1": complete}}, lines)
+                report = results.finish(0)
+                self.assertEqual((report["state"], report["reason"]), expected, report)
+                self.assertIn("95折话费券", lines[0])
+                self.assertTrue(lines[0].startswith("[领取]"), lines[0])
 
     def test_failed_diy_verification_does_not_count_as_task_disappeared(self):
         responses = [{"code": "SUCCESS", "data": [{"taskStage": "UNDO", "taskId": "example"}]},

@@ -112,6 +112,32 @@ class WebTests(unittest.TestCase):
             self.assertEqual(self.client.post("/api/accounts/missing/run-all", headers=self.headers, json={}).status_code, 404)
         self.assertEqual(self.client.post(path, headers=self.headers, json={}).status_code, 503)
 
+    def test_benign_partial_is_not_retried_by_pending_scope(self):
+        """「再做也不会变」的结果（AI 豆需要真实操作、券暂时无库存）按已完成处理，不再重跑。"""
+        account = self.add_account()
+        self.assertEqual(self.client.put(f"/api/accounts/{account['id']}", headers=self.headers,
+                                         json={"options": {"claim": True, "tasks": True, "games": True}}
+                                         ).status_code, 200, "打开三个附加步骤，卡片才会列出对应子结果")
+        run_id = self.store.enqueue(account["id"], "sign")
+        self.store.finish(run_id, "success", 0, "执行完成", {
+            "version": 1, "state": "success", "reason": "skipped", "auth": "valid",
+            "parts": {"main": {"state": "success", "reason": "ok"},
+                      "claim": {"state": "success", "reason": "empty"},
+                      "tasks": {"state": "success", "reason": "skipped"},
+                      "games": {"state": "success", "reason": "unavailable"}}})
+        overview = self.client.get("/api/accounts").json["accounts"][0]
+        sign = next(item for item in overview["summary"]["tasks"] if item["task"] == "sign")
+        self.assertEqual(sign["state"], "success", overview["summary"])
+        self.assertEqual([part["code"] for part in sign["parts"]], ["empty", "skipped", "unavailable"])
+        with patch.object(self.manager, "healthy", return_value=True):
+            response = self.client.post(f"/api/accounts/{account['id']}/run-all", headers=self.headers,
+                                       json={"mode": "pending"})
+        queued = sorted(item["task"] for item in response.json["queued"])
+        self.assertNotIn("sign", queued,
+                         "提示需要真实操作／暂时无库存的签到不再列入「只执行未完成和出错的任务」")
+        self.assertEqual(queued, ["rate", "seckill", "wed"], "其余从未执行过的任务照常提交")
+        self.assertEqual([item["task"] for item in response.json["skipped"]], [], "签到直接被排除，不算跳过")
+
     def test_account_run_all_includes_fee_only_with_cookie(self):
         account = self.add_account()
         self.assertEqual(self.client.put(f"/api/accounts/{account['id']}", headers=self.headers,
@@ -161,32 +187,40 @@ class WebTests(unittest.TestCase):
             everything = self.client.post(path, headers=self.headers, json={"mode": "all"})
             self.assertEqual(sorted(item["task"] for item in everything.json["queued"]), ["rate", "seckill", "sign", "wed"])
 
-    def test_activities_crud_and_manual_run(self):
+    def test_activity_settings_and_manual_run(self):
+        """活动清单由后端维护：网页只能改执行参数，不能新增或删除。"""
         account = self.add_account()
-        payload = {"name": "示例秒杀", "kind": "seckill", "time": "11:59:55",
-                   "lead": 3, "interval": 0.5, "max_attempts": 40,
-                   "weekdays": [1, 3], "accounts": [], "enabled": False}
-        created = self.client.post("/api/activities", headers=self.headers, json=payload)
-        self.assertEqual(created.status_code, 201)
-        activity = created.json["activity"]
+        activity = self.client.get("/api/activities").json["activities"][0]
+        self.assertEqual(activity["id"], "seckill-daily")
         self.assertEqual(activity["account_count"], 1)
-        self.assertIn("next_run", activity)
-        # 表单把三个抢购参数平铺提交，必须原样保存（否则秒杀只会用脚本自带默认值）。
-        self.assertEqual({key: activity["config"][key] for key in ("lead", "interval", "max_attempts")},
-                         {"lead": 3, "interval": 0.5, "max_attempts": 40})
-        stored = self.store.activity(activity["id"])["config"]
-        self.assertEqual({key: stored[key] for key in ("lead", "interval", "max_attempts")},
-                         {"lead": 3, "interval": 0.5, "max_attempts": 40})
-        duplicate = self.client.post("/api/accounts", headers=self.headers, json={"name": "另一个", "config": {"phone": "13900001234", "app_token": "example-token"}})
-        second = duplicate.json["account"]["id"]
+        self.assertTrue(activity["description"], "卡片上要显示后端写的活动说明")
+        created = self.client.post("/api/activities", headers=self.headers, json={
+            "name": "示例秒杀", "kind": "seckill", "time": "11:59:55", "lead": 3})
+        self.assertEqual(created.status_code, 400, "网页不能新增活动")
+        self.assertIn("服务端维护", created.json["error"])
+        self.assertEqual(self.client.delete(f"/api/activities/{activity['id']}",
+                                            headers=self.headers).status_code, 400, "网页不能删除活动")
+        # 表单把三个抢购参数平铺提交，必须原样保存；名称、类型、参与账号改不动。
+        second = self.client.post("/api/accounts", headers=self.headers, json={
+            "name": "另一个", "config": {"phone": "13900001234", "app_token": "example-token"}}).json["account"]["id"]
         updated = self.client.put(f"/api/activities/{activity['id']}", headers=self.headers,
-                                  json={**payload, "name": "改名"})
+                                  json={"time": "12:00:00", "lead": 3, "interval": 0.5, "max_attempts": 40,
+                                        "weekdays": [1, 3], "enabled": True, "name": "改名试试",
+                                        "kind": "other", "accounts": []})
         self.assertEqual(updated.status_code, 200)
-        self.assertEqual(updated.json["activity"]["account_count"], 2,
-                         "空账号列表表示全部账号（此时已有 2 个账号）")
-        self.assertEqual(self.client.post("/api/activities", headers=self.headers,
-                                          json={**payload, "name": "示例秒杀", "kind": "other"}).status_code, 400,
-                         "未知活动类型应拒绝")
+        body = updated.json["activity"]
+        self.assertEqual({key: body["config"][key] for key in ("lead", "interval", "max_attempts")},
+                         {"lead": 3, "interval": 0.5, "max_attempts": 40})
+        self.assertEqual((body["time"], body["weekdays"], body["enabled"]), ("12:00:00", [1, 3], True))
+        self.assertEqual((body["name"], body["kind"]), (activity["name"], "seckill"), "清单字段不可改")
+        self.assertEqual(body["account_count"], 2, "全部账号参与，新增账号自动加入")
+        stored = self.store.activity(activity["id"])
+        self.assertEqual({key: stored["config"][key] for key in ("lead", "interval", "max_attempts")},
+                         {"lead": 3, "interval": 0.5, "max_attempts": 40})
+        self.assertEqual(self.client.put(f"/api/activities/{activity['id']}", headers=self.headers,
+                                         json={"time": "25:00"}).status_code, 400)
+        self.assertEqual(self.client.put(f"/api/activities/{activity['id']}", headers=self.headers,
+                                         json={"lead": 99}).status_code, 400)
         with patch.object(self.manager, "healthy", return_value=True):
             run = self.client.post(f"/api/activities/{activity['id']}/run", headers=self.headers, json={})
             self.assertEqual(run.status_code, 202)
@@ -197,22 +231,13 @@ class WebTests(unittest.TestCase):
             again = self.client.post(f"/api/activities/{activity['id']}/run", headers=self.headers, json={})
             self.assertEqual(again.json["queued"], [])
             self.assertEqual(len(again.json["skipped"]), 2)
-        self.assertEqual(self.client.post("/api/activities", headers=self.headers, json={**payload, "name": "缺账号", "kind": "nope"}).status_code, 400)
-        refused = self.client.delete(f"/api/activities/{activity['id']}", headers=self.headers)
-        self.assertEqual(refused.status_code, 400, "还有排队中的秒杀任务时不允许删除活动")
-        self.assertIn("请先停止再删除", refused.json["error"])
-        for item in self.store.runs():
-            self.store.finish(item["id"], "success", 0, "执行完成")
-        self.assertEqual(self.client.delete(f"/api/activities/{activity['id']}", headers=self.headers).status_code, 200)
-        self.assertEqual(self.client.delete(f"/api/activities/{activity['id']}", headers=self.headers).status_code, 404)
+        self.assertEqual({item["account_id"] for item in run.json["queued"]}, {account["id"], second})
 
     def test_seckill_parallel_take_run_and_result_endpoint(self):
         first = self.add_account()
         second = self.client.post("/api/accounts", headers=self.headers, json={
             "name": "另一个", "config": {"phone": "13900001234", "app_token": "example-token"}}).json["account"]
-        payload = {"name": "并行秒杀", "kind": "seckill", "time": "11:59:55",
-                   "weekdays": [0], "accounts": [], "enabled": True}
-        activity = self.client.post("/api/activities", headers=self.headers, json=payload).json["activity"]
+        activity = self.client.get("/api/activities").json["activities"][0]
         with patch.object(self.manager, "healthy", return_value=True):
             run = self.client.post(f"/api/activities/{activity['id']}/run", headers=self.headers, json={})
             self.assertEqual(len(run.json["queued"]), 2)
@@ -231,9 +256,8 @@ class WebTests(unittest.TestCase):
 
     def test_activities_schedule_enqueues_for_selected_accounts(self):
         account = self.add_account()
-        payload = {"name": "定时秒杀", "kind": "seckill", "time": "11:59:55",
-                   "weekdays": [0], "accounts": [], "enabled": True}
-        activity = self.client.post("/api/activities", headers=self.headers, json=payload).json["activity"]
+        activity = self.client.get("/api/activities").json["activities"][0]
+        self.client.put(f"/api/activities/{activity['id']}", headers=self.headers, json={"enabled": True})
         from cmcc_app.models import utcnow
         from datetime import timedelta
         def set_fire(offset):

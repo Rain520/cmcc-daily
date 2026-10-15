@@ -134,21 +134,30 @@ def run_diy_tasks(s: requests.Session, referer: str, component: str, dry_run: bo
     if dry_run or not todo:
         return f"代币任务 {len(tasks)} 个，待办 {len(todo)} 个"
 
-    done = 0
+    done = skipped = failed = 0
     for t in todo:
         tid = t.get("taskId")
         if not tid:
             continue
-        api_call(s, referer, "POST", f"/qwhdhub/diyTask/finish/{tid}", {})
+        fin = api_call(s, referer, "POST", f"/qwhdhub/diyTask/finish/{tid}", {})
         # 复查清单：完成后任务可能直接移出列表，按"消失"也算成功
         chk = api_call(s, referer, "GET", f"/qwhdhub/diyTask/list/{component}")
         cur = next((x for x in (chk.get("data") or []) if x.get("taskId") == tid), None)
         if chk.get("code") == "SUCCESS" and (cur is None or cur.get("taskStage") == "DONE"):
             done += 1
+        elif task_result.benign(fin.get("msg"), chk.get("msg")):
+            # 需要真实操作／次数已达上限之类：再做一次也不会变，按跳过处理。
+            skipped += 1
+            log.info("[代币任务] %s 跳过（%s）", tid, fin.get("msg") or chk.get("msg"))
+        else:
+            failed += 1
         time.sleep(random.uniform(1, 2.5))
-    if done < len(todo):
+    if failed:
         task_result.mark("partial", "partial")
-    return f"代币任务 {len(todo)} 个待办，完成 {done} 个"
+    elif skipped:
+        task_result.mark("success", "skipped")
+    text = f"代币任务 {len(todo)} 个待办，完成 {done} 个"
+    return text + (f"，跳过 {skipped} 个（需真实操作）" if skipped else "")
 
 
 def run_lottery(s: requests.Session, referer: str, cfg: dict, dry_run: bool) -> str:
@@ -191,6 +200,10 @@ def run_lottery(s: requests.Session, referer: str, cfg: dict, dry_run: bool) -> 
             results.append("未中奖" + ("(即停)" if stop_on_miss else ""))
             if stop_on_miss:
                 break
+        elif task_result.benign(r.get("msg")):
+            # 次数已达上限／活动未开始之类，按正常跳过。
+            results.append(f"跳过({r.get('msg')})")
+            break
         else:
             task_result.mark("partial", "business")
             results.append(f"失败({r.get('code')} {r.get('msg')})")
@@ -292,6 +305,10 @@ def run_mark_tasks(s: requests.Session, referer: str, cfg, dry_run: bool) -> str
             n = (aw.get("data") or {}).get("awardNum")
             log.info("[AI豆] 补领 %s +%s", t.get("taskName", tid), n)
             got += 1
+        elif task_result.benign(aw.get("msg")):
+            # 已领过／没库存这类结果再试也不会变，按正常处理。
+            log.info("[AI豆] 补领 %s 暂不可领（%s），按正常跳过", t.get("taskName", tid), aw.get("msg"))
+            task_result.mark("success", "unavailable")
         else:
             task_result.mark("partial", "business")
         time.sleep(random.uniform(0.2, 0.5))
@@ -345,7 +362,12 @@ def run_mark_tasks(s: requests.Session, referer: str, cfg, dry_run: bool) -> str
             aw = api_call(s, referer, "POST", "/qwhdhub/api/mark/task/getTaskAward",
                           {"taskId": tid})
             if aw.get("code") != "SUCCESS":
-                task_result.mark("partial", "business")
+                if task_result.benign(aw.get("msg")):
+                    log.info("[AI豆] %s 领奖暂不可用（%s），按正常跳过",
+                             t.get("taskName", tid), aw.get("msg"))
+                    task_result.mark("success", "unavailable")
+                else:
+                    task_result.mark("partial", "business")
             n = (aw.get("data") or {}).get("awardNum") if aw.get("code") == "SUCCESS" else "?"
             log.info("[AI豆] %s +%s", t.get("taskName", tid), n)
             got += 1
@@ -381,7 +403,7 @@ def run_games(cfg, dry_run: bool) -> list[str]:
             else:
                 r = api_call(s, referer, do_method, do_path, do_body)
                 ok = r.get("code") == "SUCCESS" or "已签" in (r.get("msg") or "")
-                if not ok:
+                if not ok and not task_result.benign(r.get("msg")):
                     task_result.mark("partial", "business")
                 lines.append(f"{act['name']}: 打卡{'成功' if ok else '失败 ' + str(r.get('msg'))}")
 

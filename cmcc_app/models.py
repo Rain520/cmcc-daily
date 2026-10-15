@@ -225,25 +225,18 @@ ACTIVITY_KINDS = ("seckill",)
 SECKILL_TIME_PATTERN = re.compile(r"(?:[01][0-9]|2[0-3]):[0-5][0-9](?::[0-5][0-9])?")
 
 
-def normalize_activity(body, old=None, accounts=None, timezone_name="Asia/Shanghai"):
-    """校验一个活动任务卡片：kind、执行时间与要执行的账号。"""
-    old = old or {}
-    kind = body.get("kind", old.get("kind"))
-    if kind not in ACTIVITY_KINDS:
-        raise ValueError("活动类型不支持")
-    name = body.get("name", old.get("name", ""))
-    if not isinstance(name, str) or not 1 <= len(name.strip()) <= 40:
-        raise ValueError("活动名称应为 1～40 个字符")
+def activity_config(body, old=None):
+    """校验活动的抢购参数：lead／interval／max_attempts，平铺与 {config:{...}} 两种写法都接受。"""
+    old_config = (old or {}).get("config", {})
     nested = body.get("config", {})
     if not isinstance(nested, dict):
         raise ValueError("活动配置必须是对象")
-    # 网页表单把三个抢购参数平铺在顶层，这里同时接受平铺和 {config:{...}} 两种写法；
     # 不认识的键会被忽略，避免旧客户端多传字段就保存失败。
     supplied = {key: value for key, value in nested.items() if key in SECKILL_DEFAULTS}
     for field in ("lead", "interval", "max_attempts"):
         if field in body:
             supplied[field] = body[field]
-    config = {**SECKILL_DEFAULTS, **old.get("config", {})}
+    config = {**SECKILL_DEFAULTS, **old_config}
     for field in ("lead", "interval", "max_attempts"):
         if field in supplied:
             try:
@@ -257,9 +250,37 @@ def normalize_activity(body, old=None, accounts=None, timezone_name="Asia/Shangh
             if field == "max_attempts" and not 1 <= value <= 600:
                 raise ValueError("最大尝试次数应为 1～600")
             config[field] = value
-    time_value = body.get("time", old.get("time") or SECKILL_DEFAULTS["time"])
-    if not isinstance(time_value, str) or not SECKILL_TIME_PATTERN.fullmatch(time_value):
+    return config
+
+
+def activity_time(body, old=None):
+    """校验开抢时间（HH:MM 或 HH:MM:SS）。"""
+    value = body.get("time") or (old or {}).get("time") or SECKILL_DEFAULTS["time"]
+    if not isinstance(value, str) or not SECKILL_TIME_PATTERN.fullmatch(value):
         raise ValueError("开抢时间格式应为 HH:MM 或 HH:MM:SS")
+    return value
+
+
+def activity_weekdays(body, old=None):
+    """校验活动日：周一到周日中的若干天，缺省表示每天。"""
+    weekdays = body.get("weekdays", (old or {}).get("weekdays"))
+    if weekdays is None:
+        return list(range(7))
+    if (not isinstance(weekdays, list) or not weekdays
+            or any(not isinstance(day, int) or isinstance(day, bool) or not 0 <= day <= 6 for day in weekdays)):
+        raise ValueError("活动日应为周一到周日中的若干天")
+    return sorted(set(weekdays))
+
+
+def normalize_activity(body, old=None, accounts=None, timezone_name="Asia/Shanghai"):
+    """校验一条内置活动（后端清单用）：kind、名称、执行时间与要执行的账号。"""
+    old = old or {}
+    kind = body.get("kind", old.get("kind"))
+    if kind not in ACTIVITY_KINDS:
+        raise ValueError("活动类型不支持")
+    name = body.get("name", old.get("name", ""))
+    if not isinstance(name, str) or not 1 <= len(name.strip()) <= 40:
+        raise ValueError("活动名称应为 1～40 个字符")
     supplied_accounts = body.get("accounts")
     if supplied_accounts is not None and not isinstance(supplied_accounts, list):
         raise ValueError("执行账号格式不正确")
@@ -268,17 +289,23 @@ def normalize_activity(body, old=None, accounts=None, timezone_name="Asia/Shangh
     else:
         # 全部账号参与：不选或留空都表示所有账号。
         phone_list = list(dict.fromkeys(item["id"] for item in accounts)) if accounts is not None else (supplied_accounts or [])
-    weekdays = body.get("weekdays", old.get("weekdays"))
-    if weekdays is None:
-        weekdays = list(range(7))
-    if (not isinstance(weekdays, list) or not weekdays
-            or any(not isinstance(day, int) or isinstance(day, bool) or not 0 <= day <= 6 for day in weekdays)):
-        raise ValueError("活动日应为周一到周日中的若干天")
-    weekdays = sorted(set(weekdays))
     return {"id": old.get("id", uuid.uuid4().hex), "name": name.strip(), "kind": kind,
-            "config": config, "time": time_value, "weekdays": weekdays,
-            "accounts": phone_list, "enabled": bool(body.get("enabled", old.get("enabled", False))),
-            "next_run": None}
+            "config": activity_config(body, old), "time": activity_time(body, old),
+            "weekdays": activity_weekdays(body, old), "accounts": phone_list,
+            "enabled": bool(body.get("enabled", old.get("enabled", False))), "next_run": None}
+
+
+def activity_settings(body, activity, timezone_name="Asia/Shanghai"):
+    """网页上能改的只有执行参数：是否启用、开抢时间、抢购参数与活动日。
+
+    活动清单（有哪些活动、叫什么、用哪个脚本、给哪些账号）由 `cmcc_app/activities.py` 决定，
+    提交里的 name／kind／accounts 一律忽略，改不动。
+    """
+    if not isinstance(body, dict):
+        raise ValueError("请求必须为 JSON 对象")
+    return {**activity, "config": activity_config(body, activity),
+            "time": activity_time(body, activity), "weekdays": activity_weekdays(body, activity),
+            "enabled": bool(body.get("enabled", activity.get("enabled", False))), "next_run": None}
 
 
 def activity_next_run(activity, timezone_name="Asia/Shanghai", now=None):
@@ -702,10 +729,41 @@ class Store:
         value["enabled"] = bool(value["enabled"])
         return value
 
+    def sync_activities(self, definitions, timezone_name="Asia/Shanghai"):
+        """按后端清单同步活动：补上新增的、刷新名称与参与账号、保留用户改过的执行参数、下线已移除的。
+
+        秒杀接口各不相同，清单只在代码里维护（见 cmcc_app/activities.py），网页上不能增删。
+        """
+        stored = {item["id"]: item for item in self.activities()}
+        accounts = self.accounts()  # 全部账号参与：每次同步都按当前账号刷新
+        added, updated, removed, kept = [], [], [], []
+        for item in definitions:
+            old = stored.pop(item["id"], None)
+            defaults = {**SECKILL_DEFAULTS, **item.get("defaults", {})}
+            activity = normalize_activity(
+                {"kind": item["kind"], "name": item["name"],
+                 "config": {**defaults, **(old["config"] if old else {})},
+                 "time": (old or {}).get("time") or defaults["time"],
+                 "weekdays": (old or {}).get("weekdays"),
+                 "enabled": bool(old["enabled"]) if old else False},
+                {"id": item["id"]}, accounts=accounts, timezone_name=timezone_name)
+            self.save_activity(activity, timezone_name)
+            (updated if old else added).append(item["id"])
+        for activity_id in list(stored):
+            try:
+                self.delete_activity(activity_id)
+            except ValueError:
+                kept.append(activity_id)  # 还有排队中的秒杀任务，先留着，任务结束再下线
+            else:
+                removed.append(activity_id)
+        return {"added": added, "updated": updated, "removed": removed, "kept": kept}
+
     def save_activity(self, activity, timezone_name="Asia/Shanghai"):
         with self.connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             activity["next_run"] = activity_next_run(activity, timezone_name)
+            # 秒杀活动固定「全部账号参与」：账号列表始终跟随当前的账号列表。
+            activity["accounts"] = self.activity_account_ids()
             stored = {**activity["config"], "time": activity["time"], "weekdays": activity["weekdays"]}
             try:
                 conn.execute("""INSERT INTO activities (id,name,kind,config,accounts,enabled,next_run)
@@ -744,12 +802,11 @@ class Store:
                 fire = datetime.fromisoformat(due)
                 if now < fire - timedelta(seconds=seckill_enqueue_ahead(activity)):
                     continue
+                # 全部账号参与：每次到点都按当前账号列表排队，新增账号不需要改配置。
                 account_rows = conn.execute("SELECT * FROM accounts").fetchall()
-                decoded = {item["id"]: self.decode(item) for item in account_rows}
-                for account_id in activity["accounts"]:
-                    account = decoded.get(account_id)
-                    if account is None:
-                        continue
+                for account_row in account_rows:
+                    account = self.decode(account_row)
+                    account_id = account["id"]
                     try:
                         run_id = self.insert_run(conn, account, "seckill", False, "schedule",
                                                  now.isoformat(), activity["id"])
@@ -774,13 +831,21 @@ class Store:
                 "interval": config.get("interval", SECKILL_DEFAULTS["interval"]),
                 "max_attempts": config.get("max_attempts", SECKILL_DEFAULTS["max_attempts"])}
 
+    def activity_account_ids(self):
+        """秒杀活动固定「全部账号参与」：按当前账号列表算，新增账号不用改配置。"""
+        with self.connect() as conn:
+            return [row["id"] for row in conn.execute("SELECT id FROM accounts ORDER BY rowid").fetchall()]
+
     def pending_runs_for_activity_accounts(self, activity):
         """活动卡片显示：哪些账号的秒杀还在排队或执行中。"""
-        marks = ",".join("?" * len(activity["accounts"]))
+        account_ids = self.activity_account_ids()
+        if not account_ids:
+            return {}
+        marks = ",".join("?" * len(account_ids))
         with self.connect() as conn:
             rows = conn.execute(f"SELECT account_id, status FROM runs WHERE task='seckill' "
                                 f"AND status IN ('queued','running') AND account_id IN ({marks})",
-                                tuple(activity["accounts"])).fetchall()
+                                tuple(account_ids)).fetchall()
         return {row["account_id"]: row["status"] for row in rows}
 
     def pending_tasks(self):

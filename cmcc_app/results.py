@@ -8,8 +8,22 @@ REASONS = {
     "login": "登录失败，请查看日志", "network": "网络请求失败，请稍后重试",
     "business": "活动接口返回异常，请查看日志", "partial": "部分步骤未完成，请查看日志",
     "skipped": "部分步骤需要真实操作，已跳过", "missing": "附属模块不可用",
+    "unavailable": "奖品暂时没有库存或名额，属正常情况",
     "query": "仅查询，未执行任务", "unknown": "详情未记录", "stopped": "任务已停止",
 }
+# 「再试也不会变」的提示：库存不足、次数已达上限、需要真实操作等，按正常情况处理，不计为失败，
+# 也不再被「只执行未完成和出错的任务」选中重跑。
+BENIGN_MESSAGES = ("库存不足", "已抢完", "已领完", "已领取", "没有库存", "已达上限", "已到上限",
+                   "已达上限", "次数已用完", "次数已达", "已结束", "未开始", "未到窗口",
+                   "不在活动时间", "需要真实操作", "真实用户", "第三方", "公众号", "外部合作", "实名")
+
+
+def benign(*messages):
+    """提示语是否说明「这次没拿到，但再做一次也不会变」。"""
+    text = " ".join(str(item) for item in messages if item)
+    return any(word in text for word in BENIGN_MESSAGES)
+
+
 PARTS = ("main", "claim", "tasks", "games")
 STATES = ("success", "partial", "failed", "skipped", "unexecuted", "query", "interrupted")
 _current = ContextVar("task_result", default=None)
