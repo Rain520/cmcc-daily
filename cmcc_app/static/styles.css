@@ -28,6 +28,7 @@
 .checked-at{font-size:11px;color:#8a9ca1}.account-issue{margin-top:9px;font-size:11px;color:#a4702f}
 .account-task-list{display:grid;margin:3px 0 20px}.account-task-row{padding:14px 0;border-bottom:1px solid #f0f4f2}.account-task-row:last-child{border-bottom:0;padding-bottom:0}
 .account-task-heading{display:flex;align-items:center;justify-content:space-between;gap:8px}.account-task-heading strong{font-size:13px;font-weight:600;color:#385b61}
+.task-result-actions{display:flex;align-items:center;justify-content:flex-end;gap:10px;flex-wrap:wrap}.task-dismiss{font-size:11px;padding:5px 0;white-space:nowrap;color:var(--muted)}.task-dismiss:hover{color:var(--green)}
 .task-status{display:inline-flex;align-items:center;justify-content:center;flex:none;border:1px solid transparent;border-radius:6px;background:#f2f5f5;color:#829499;font-size:11px;line-height:1.6;padding:3px 8px;font-weight:500;white-space:nowrap}
 button.task-status{cursor:pointer}button.task-status:hover{filter:brightness(.95);border-color:currentColor}
 .task-status.success{background:#eaf6ef;color:#238460}.task-status.failed{background:#fcf0ee;color:#b9544c}.task-status.partial,.task-status.missed,.badge.partial{background:#fff5e5;color:#a87323}.task-status.running,.task-status.queued{background:#eaf3fc;color:#377cac}

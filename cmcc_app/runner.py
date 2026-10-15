@@ -136,14 +136,14 @@ class Manager(threading.Thread):
                         process.wait(timeout=5)
                     exit_code = process.returncode
                 if finished_normally and result_path.exists() and result_path.stat().st_size < 16384:
-                    from .results import clean, REASONS
+                    from .results import for_task, REASONS
                     try:
-                        result = clean(json.loads(result_path.read_text(encoding="utf-8")))
+                        result = for_task(run["task"], json.loads(result_path.read_text(encoding="utf-8")), run["dry_run"])
                     except (ValueError, OSError):
                         result = None
                     if result and result["state"] not in ("success", "partial", "failed", "interrupted"):
                         result = None
-                    if result and status == "success":
+                    if result and (status == "success" or (run["task"] == "sign" and result["state"] == "success")):
                         status = result["state"]
                         message = REASONS[result["reason"]]
                 output.write(f"\n[应用] {message}（退出码 {exit_code}）\n")

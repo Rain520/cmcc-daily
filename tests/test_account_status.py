@@ -193,14 +193,14 @@ class StructuredResultTests(unittest.TestCase):
         results.start("sign", {"claim": True, "tasks": True})
         self.addCleanup(lambda: results._current.set(None))
 
-    def test_main_success_does_not_hide_child_failure(self):
+    def test_sign_success_keeps_child_failure_without_failing_whole_task(self):
         results.auth(True)
         results.mark()
         results.begin("claim")
         results.error(requests.Timeout("private-detail"))
         results.mark()
         report = results.finish(0)
-        self.assertEqual(report["state"], "partial")
+        self.assertEqual(report["state"], "success")
         self.assertEqual(report["parts"]["claim"]["reason"], "network")
         self.assertNotIn("private-detail", json.dumps(report))
 
@@ -211,6 +211,7 @@ class StructuredResultTests(unittest.TestCase):
         results.mark()
         results.begin("tasks")
         results.mark("success", "skipped")
+        results.mark()  # 主签到返回后会再次标记完成，必须保留正常跳过的提示。
         report = results.finish(0)
         self.assertEqual(report["state"], "success")
         self.assertEqual(report["parts"]["tasks"]["reason"], "skipped")
@@ -222,7 +223,7 @@ class StructuredResultTests(unittest.TestCase):
         results.mark()
         self.assertEqual(results.finish(0)["parts"]["claim"]["state"], "query")
 
-    def test_upstream_claim_exception_reports_partial(self):
+    def test_upstream_claim_exception_preserves_sign_success(self):
         cfg = SimpleNamespace(phone="13800000011")
         signed = {"userinfo": {}, "markstatus": [{"date": datetime.now().strftime("%Y%m%d"), "status": "1"}]}
         with patch.object(cmcc_sign, "exchange_session", return_value=(Mock(), "https://example.com")), \
@@ -230,7 +231,7 @@ class StructuredResultTests(unittest.TestCase):
                 patch.object(cmcc_sign, "notify_task"):
             code = cmcc_sign.run(cfg, False)
         self.assertEqual(results.finish(code)["parts"]["claim"]["state"], "failed")
-        self.assertEqual(results.finish(code)["state"], "partial")
+        self.assertEqual(results.finish(code)["state"], "success")
 
     def test_ai_bean_list_error_cannot_be_reported_as_no_tasks(self):
         results.begin("tasks")
@@ -325,11 +326,88 @@ class StructuredResultTests(unittest.TestCase):
                 patch.object(cmcc_extra.time, "sleep"):
             text = cmcc_extra.run_mark_tasks(session, "https://example.com", Mock(), False)
         report = results.finish(0)
-        self.assertIn("完成 1 个", text)
+        self.assertIn("完成 0 个", text)
         self.assertIn("跳过 1 个", text)
+        self.assertIn("领奖暂不可用 1 个，失败 0 个", text)
         self.assertEqual(report["state"], "success", report)
         self.assertEqual(report["parts"]["tasks"]["state"], "success")
         self.assertIn(report["parts"]["tasks"]["reason"], ("skipped", "unavailable"))
+
+    def test_ai_bean_normal_skips_survive_full_sign_run(self):
+        signed = {"userinfo": {}, "markstatus": [{"date": datetime.now().strftime("%Y%m%d"), "status": "1"}]}
+        task = {"taskId": "preview-task", "taskName": "示例真实操作任务", "status": 0}
+        external = {"taskId": "preview-external", "status": 0, "taskClasifiName": "外部合作区"}
+        external_award = {"taskId": "preview-external-award", "status": 1, "taskClasifiName": "外部合作区"}
+        results.start("sign", {"tasks": True})
+        session = Mock()
+        session.post.return_value.json.return_value = {"code": "FAIL", "msg": "需要真实操作，请在 App 内完成"}
+        with patch.object(cmcc_sign, "exchange_session", return_value=(session, "https://example.com")), \
+                patch.object(cmcc_sign, "query_markstatus", return_value=signed), \
+                patch.object(cmcc_sign, "notify_task"), patch.object(cmcc_extra.time, "sleep"), \
+                patch.object(cmcc_extra, "api_call", side_effect=[
+                    {"code": "SUCCESS", "data": {"tasks": [task, external, external_award]}},
+                    {"code": "SUCCESS", "data": {"taskType": "scan"}}]):
+            code = cmcc_sign.run(SimpleNamespace(phone="13800000011"), False, claim=False, tasks=True)
+        report = results.finish(code)
+        self.assertEqual(report["state"], "success", report)
+        self.assertEqual(report["parts"]["tasks"], {"state": "success", "reason": "skipped"})
+
+    def test_ai_bean_pending_award_failure_is_visible_alongside_normal_skip(self):
+        tasks = [{"taskId": "preview-award", "taskName": "示例补领", "status": 1},
+                 {"taskId": "preview-task", "taskName": "示例待办", "status": 0}]
+        for message, expected in (("奖品库存不足", "success"), ("系统繁忙", "partial")):
+            with self.subTest(message=message):
+                results.start("sign", {"tasks": True})
+                results.begin("tasks")
+                session = Mock()
+                session.post.return_value.json.return_value = {"code": "FAIL", "msg": "需要真实操作"}
+                with patch.object(cmcc_extra, "api_call", side_effect=[
+                        {"code": "SUCCESS", "data": {"tasks": tasks}},
+                        {"code": "FAIL", "msg": message},
+                        {"code": "SUCCESS", "data": {"taskType": "scan"}}]), \
+                        patch.object(cmcc_extra.time, "sleep"), self.assertLogs(cmcc_extra.log, "INFO") as logs:
+                    text = cmcc_extra.run_mark_tasks(session, "https://example.com", Mock(), False)
+                results.mark()
+                self.assertEqual(results.finish(0)["state"], "success")
+                self.assertEqual(results.finish(0)["parts"]["tasks"]["state"], expected)
+                self.assertIn("跳过 1 个", text)
+                self.assertIn("失败 1 个" if expected == "partial" else "失败 0 个", text)
+                if expected == "partial":
+                    self.assertIn("补领 示例补领 失败: code=FAIL msg=系统繁忙", "\n".join(logs.output))
+
+    def test_ai_bean_task_api_errors_are_not_labeled_as_real_operation_skips(self):
+        task = {"taskId": "preview-task", "taskName": "示例任务", "status": 0}
+        for step in ("info", "finish", "award"):
+            with self.subTest(step=step):
+                results.start("sign", {"tasks": True})
+                results.begin("tasks")
+                responses = [{"code": "SUCCESS", "data": {"tasks": [task]}},
+                             {"code": "FAIL", "msg": "系统繁忙"} if step == "info"
+                             else {"code": "SUCCESS", "data": {"taskType": "scan"}}]
+                if step == "award":
+                    responses.append({"code": "FAIL", "msg": "系统繁忙"})
+                session = Mock()
+                session.post.return_value.json.return_value = (
+                    {"code": "FAIL", "msg": "系统繁忙"} if step == "finish" else {"code": "SUCCESS"})
+                with patch.object(cmcc_extra, "api_call", side_effect=responses), \
+                        patch.object(cmcc_extra.time, "sleep"):
+                    text = cmcc_extra.run_mark_tasks(session, "https://example.com", Mock(), False)
+                self.assertEqual(results.finish(0)["state"], "success")
+                self.assertEqual(results.finish(0)["parts"]["tasks"]["state"], "partial")
+                self.assertIn("完成 0 个，跳过 0 个", text)
+                self.assertIn("失败 1 个", text)
+                if step == "info":
+                    session.post.assert_not_called()
+
+    def test_only_external_ai_bean_tasks_are_normal_skips(self):
+        results.begin("tasks")
+        with patch.object(cmcc_extra, "api_call", return_value={"code": "SUCCESS", "data": {"tasks": [
+                {"taskId": "preview-external", "status": 0, "taskClasifiName": "外部合作区"},
+                {"taskId": "preview-external-award", "status": 1, "taskClasifiName": "外部合作区"}]}}) as api:
+            cmcc_extra.run_mark_tasks(Mock(), "https://example.com", Mock(), False)
+        results.mark()
+        self.assertEqual(results.finish(0)["parts"]["tasks"], {"state": "success", "reason": "skipped"})
+        api.assert_called_once()
 
     def test_puzzle_prize_without_stock_is_not_a_failure(self):
         """拼图兑奖「库存不足」不算失败；库存充足却报错才算失败。"""

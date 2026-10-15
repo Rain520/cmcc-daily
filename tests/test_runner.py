@@ -90,9 +90,10 @@ path.with_suffix('.result.json').write_text(json.dumps({
     'parts': {'main': {'state': 'success', 'reason': 'ok'},
               'claim': {'state': 'failed', 'reason': 'network'}}}))
 """)
-        self.assertEqual(result["status"], "partial")
+        self.assertEqual(result["status"], "success")
         self.assertIn('"claim"', result["result"])
-        self.assertIn("部分", result["message"])
+        self.assertEqual(json.loads(result["result"])["parts"]["claim"]["state"], "failed")
+        self.assertEqual(result["message"], "执行完成")
 
     def test_timeout_terminates_child(self):
         self.manager.settings = Settings(self.root, "test-password-only", task_timeout=0.1)

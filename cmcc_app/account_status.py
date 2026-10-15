@@ -38,8 +38,12 @@ def window(entry, now):
 def summaries(store, accounts, timezone_name, now=None):
     now = (now or utcnow()).astimezone(ZoneInfo(timezone_name))
     with store.connect() as conn:
+        conn.execute("BEGIN")
+        dismissed = {}
+        for row in conn.execute("SELECT account_id,task FROM dismissed_task_cards WHERE task='seckill'"):
+            dismissed.setdefault(row["account_id"], set()).add(row["task"])
         rows = conn.execute("""SELECT * FROM (
-            SELECT *, ROW_NUMBER() OVER (
+            SELECT *, rowid AS sequence, ROW_NUMBER() OVER (
                 PARTITION BY account_id,task,dry_run,
                 CASE WHEN status IN ('queued','running') THEN 1 ELSE 0 END
                 ORDER BY created_at DESC,rowid DESC) AS rank
@@ -60,10 +64,12 @@ def summaries(store, accounts, timezone_name, now=None):
         run = dict(row)
         run["outcome"] = clean(run.get("result"))
         grouped.setdefault(run["account_id"], []).append(run)
-    return {account["id"]: summarize(account, grouped.get(account["id"], []), now, auth_evidence.get(account["id"], [])) for account in accounts}
+    return {account["id"]: summarize(account, grouped.get(account["id"], []), now,
+                                     auth_evidence.get(account["id"], []), dismissed.get(account["id"], set()))
+            for account in accounts}
 
 
-def summarize(account, runs, now, auth_evidence=()):
+def summarize(account, runs, now, auth_evidence=(), dismissed=()):
     valid = []
     for run in runs:
         reset = moment(account.get("fee_reset_at" if run["task"] == "fee" else "status_reset_at"))
@@ -72,7 +78,9 @@ def summarize(account, runs, now, auth_evidence=()):
             valid.append(run)
     completed = sorted((r for r in valid if r["status"] not in ("queued", "running")),
                        key=lambda r: moment(r.get("finished_at")) or moment(r["created_at"]), reverse=True)
-    pending = next((r for r in runs if r["status"] in ("queued", "running")), None)
+    active_tasks = {r["task"]: r for r in runs if r["status"] in ("queued", "running")}
+    pending = next((r for r in active_tasks.values() if r["status"] == "running"),
+                   next(iter(active_tasks.values()), None))
     # App Token and the separate fee Cookie never validate each other.
     auth_states = {}
     evidence = []
@@ -92,6 +100,8 @@ def summarize(account, runs, now, auth_evidence=()):
             latest_tasks.setdefault(run["task"], run)
     warnings = []
     for run in latest_tasks.values():
+        if run["task"] in dismissed:
+            continue
         outcome = run.get("outcome")
         if run["status"] in ("failed", "partial", "interrupted"):
             scope = "fee" if run["task"] == "fee" else "app"
@@ -100,6 +110,8 @@ def summarize(account, runs, now, auth_evidence=()):
             warnings.append(run)
     # Failed diagnostic queries matter too, but a later successful run recovers them.
     for task in TASK_ORDER:
+        if task in dismissed:
+            continue
         latest = next((r for r in completed if r["task"] == task), None)
         if latest and latest["dry_run"] and latest["status"] in ("failed", "partial"):
             outcome = latest.get("outcome")
@@ -117,7 +129,7 @@ def summarize(account, runs, now, auth_evidence=()):
     for task in TASK_ORDER:
         entry = account["schedules"][task]
         latest = latest_tasks.get(task)
-        active = pending if pending and pending["task"] == task else None
+        active = active_tasks.get(task)
         # Sign is always available; other manual tasks appear after use or configuration.
         query = next((r for r in completed if r["task"] == task and r["dry_run"] and task != "fee"), None)
         if task != "sign" and not entry["enabled"] and not latest and not active and not query and not (
@@ -144,7 +156,11 @@ def summarize(account, runs, now, auth_evidence=()):
                                   "state": part["state"] if current and part and not active else "unknown" if current and latest and not active else "unexecuted",
                                   "detail": REASONS[part["reason"]] if current and part and not active else "详情未记录" if current and latest and not active else "待本次签到执行"})
         query = next((r for r in completed if r["task"] == task and r["dry_run"] and task != "fee"), None)
+        last_record = max((r for r in runs if r["task"] == task),
+                          key=lambda r: (r["created_at"], r.get("sequence", 0)), default=None)
         tasks.append({"task": task, "state": state, "run_id": active["id"] if active else latest["id"] if latest else None,
+                      "hidden": task in dismissed and not active,
+                      "dismiss_run_id": last_record["id"] if task == "seckill" and last_record and not active else None,
                       "current": bool(current), "last_state": latest["status"] if latest else None, "last_at": latest.get("finished_at") or latest["created_at"] if latest else None,
                       "detail": reason, "parts": parts, "query_at": query.get("finished_at") if query else None,
                       "query_id": query["id"] if query else None})

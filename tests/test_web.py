@@ -103,11 +103,11 @@ class WebTests(unittest.TestCase):
         with patch.object(self.manager, "healthy", return_value=True):
             first = self.client.post(path, headers=self.headers, json={})
             self.assertEqual(first.status_code, 202)
-            self.assertEqual(sorted(item["task"] for item in first.json["queued"]), ["rate", "seckill", "sign", "wed"])
+            self.assertEqual(sorted(item["task"] for item in first.json["queued"]), ["rate", "sign", "wed"])
             self.assertEqual(first.json["skipped"], [])
             repeat = self.client.post(path, headers=self.headers, json={})
             self.assertEqual(repeat.json["queued"], [])
-            self.assertEqual(len(repeat.json["skipped"]), 4)
+            self.assertEqual(len(repeat.json["skipped"]), 3)
             self.assertTrue(all("排队" in item["reason"] for item in repeat.json["skipped"]), repeat.json["skipped"])
             self.assertEqual(self.client.post("/api/accounts/missing/run-all", headers=self.headers, json={}).status_code, 404)
         self.assertEqual(self.client.post(path, headers=self.headers, json={}).status_code, 503)
@@ -135,7 +135,7 @@ class WebTests(unittest.TestCase):
         queued = sorted(item["task"] for item in response.json["queued"])
         self.assertNotIn("sign", queued,
                          "提示需要真实操作／暂时无库存的签到不再列入「只执行未完成和出错的任务」")
-        self.assertEqual(queued, ["rate", "seckill", "wed"], "其余从未执行过的任务照常提交")
+        self.assertEqual(queued, ["rate", "wed"], "其余从未执行过的日常任务照常提交")
         self.assertEqual([item["task"] for item in response.json["skipped"]], [], "签到直接被排除，不算跳过")
 
     def test_account_run_all_includes_fee_only_with_cookie(self):
@@ -144,7 +144,7 @@ class WebTests(unittest.TestCase):
                                         json={"config": {"fee_session_cookie": "example-cookie"}}).status_code, 200)
         with patch.object(self.manager, "healthy", return_value=True):
             response = self.client.post(f"/api/accounts/{account['id']}/run-all", headers=self.headers, json={})
-        self.assertEqual(sorted(item["task"] for item in response.json["queued"]), ["fee", "rate", "seckill", "sign", "wed"])
+        self.assertEqual(sorted(item["task"] for item in response.json["queued"]), ["fee", "rate", "sign", "wed"])
 
     def test_batch_run_modes(self):
         account = self.add_account()
@@ -163,12 +163,12 @@ class WebTests(unittest.TestCase):
             self.store.finish(run["id"], "success", 0)
         with patch.object(self.manager, "healthy", return_value=True):
             only_pending = self.client.post("/api/run-batch", headers=self.headers, json={"mode": "pending"})
-            self.assertEqual(sorted(item["task"] for item in only_pending.json["queued"]), ["seckill", "wed"],
-                             "已成功的不再提交，只补未执行过的（秒杀从未执行过）")
+            self.assertEqual(sorted(item["task"] for item in only_pending.json["queued"]), ["wed"],
+                             "已成功的不再提交，只补未执行过的日常任务")
             self.store.finish(only_pending.json["queued"][0]["run_id"], "success", 0)
             everything = self.client.post("/api/run-batch", headers=self.headers, json={"mode": "all"})
             self.assertEqual(sorted(item["task"] for item in everything.json["queued"]), ["rate", "sign", "wed"],
-                             "全部执行包含已成功的任务（秒杀已在 pending 阶段被 finish 成功，属于已成功）")
+                             "全部执行包含已成功的日常任务")
         self.assertEqual(self.client.post("/api/run-batch", headers=self.headers, json={"mode": "enabled"}).status_code, 503)
 
     def test_account_run_all_modes(self):
@@ -176,7 +176,7 @@ class WebTests(unittest.TestCase):
         path = f"/api/accounts/{account['id']}/run-all"
         with patch.object(self.manager, "healthy", return_value=True):
             first = self.client.post(path, headers=self.headers, json={"mode": "pending"})
-            self.assertEqual(sorted(item["task"] for item in first.json["queued"]), ["rate", "seckill", "sign", "wed"])
+            self.assertEqual(sorted(item["task"] for item in first.json["queued"]), ["rate", "sign", "wed"])
             self.assertEqual(self.client.post(path, headers=self.headers, json={"mode": "bad"}).status_code, 400)
         for run in self.store.runs():
             self.store.finish(run["id"], "success", 0)
@@ -185,7 +185,34 @@ class WebTests(unittest.TestCase):
             self.assertEqual(again.json["queued"], [], "已执行成功的不再提交")
             self.assertEqual(len(again.json["skipped"]), 0, "已成功的任务直接不列入提交范围")
             everything = self.client.post(path, headers=self.headers, json={"mode": "all"})
-            self.assertEqual(sorted(item["task"] for item in everything.json["queued"]), ["rate", "seckill", "sign", "wed"])
+            self.assertEqual(sorted(item["task"] for item in everything.json["queued"]), ["rate", "sign", "wed"])
+
+    def test_every_batch_scope_excludes_independent_seckill(self):
+        account = self.add_account()
+        # 即使旧账号保存了秒杀计划、活动也已启用，所有一键执行范围仍必须隔离。
+        self.assertEqual(self.client.put(f"/api/accounts/{account['id']}", headers=self.headers,
+                                        json={"schedules": {
+                                            "sign": {"enabled": True, "time": "08:00"},
+                                            "seckill": {"enabled": True, "time": "12:00"}}}).status_code, 200)
+        activity = self.client.get("/api/activities").json["activities"][0]
+        self.assertEqual(self.client.put(f"/api/activities/{activity['id']}", headers=self.headers,
+                                        json={"enabled": True}).status_code, 200)
+        with patch.object(self.manager, "healthy", return_value=True):
+            for path, modes in ((f"/api/accounts/{account['id']}/run-all", ("pending", "all")),
+                                ("/api/run-batch", ("pending", "all", "enabled"))):
+                for mode in modes:
+                    with self.subTest(path=path, mode=mode):
+                        response = self.client.post(path, headers=self.headers, json={"mode": mode})
+                        self.assertEqual(response.status_code, 202)
+                        self.assertTrue(response.json["queued"])
+                        self.assertNotIn("seckill", [r["task"] for r in self.store.runs()])
+                        for item in response.json["queued"]:
+                            self.store.finish(item["run_id"], "failed", 1)
+            separate = self.client.post(f"/api/activities/{activity['id']}/run", headers=self.headers, json={})
+            self.assertEqual([r["task"] for r in separate.json["queued"]], ["seckill"])
+            run_id = separate.json["queued"][0]["run_id"]
+            self.client.post("/api/run-batch", headers=self.headers, json={"mode": "all"})
+            self.assertEqual(self.store.run(run_id)["status"], "queued", "独立提交的秒杀不受一键执行影响")
 
     def test_activity_settings_and_manual_run(self):
         """活动清单由后端维护：网页只能改执行参数，不能新增或删除。"""

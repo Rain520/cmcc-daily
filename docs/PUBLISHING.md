@@ -1,5 +1,28 @@
 # 发布容器镜像
 
+## 1.6.10（2026-10-15）
+
+已通过本机 Docker Desktop 发布 Docker Hub 镜像 `rain5201/cmcc-daily:1.6.10` 与 `latest`，支持 `linux/amd64`、`linux/arm64`。仅秒杀新增从账号卡片移除的显示设置，主签到成功后附加步骤不再改变整体状态或触发补跑；同时包含 1.6.9 的一键执行排除秒杀、AI 豆外部合作区过滤和错误日志修复。升级自动创建卡片显示状态表，并修正有明确主签到成功证据的旧结果。
+
+两个远端标签均已核对，索引摘要为 `sha256:93745ba6c51b1af7b850a5160fcfbc834ac92a140c9f6792882665245b76c721`：AMD64 清单 `sha256:35a13ab0d900909bdddeaf4decb67142ab93e6264f3240aa2dea65f4f09e2f47`，ARM64 清单 `sha256:fe23e756b0a10b522b779737850ad316054c13fa13252d6e5b31449e9a499fdb`。
+
+发布前 202 项单元测试（Windows 跳过 4 项 Linux 专用测试）、JavaScript 语法检查、容器冒烟及虚构预览页面验证完成；发布时另在 Linux 容器内运行 6 项启动与权限测试，全部通过。结论见 [验证记录](VALIDATION.md)。本地正式实例已使用同一份源码的本地标签 `cmcc-daily:local-1.6.10`，继续保留原数据卷、配置与 18080 端口。
+
+发布后按上述索引摘要从 Docker Hub 拉取 AMD64 镜像，再运行 `tests/container_smoke.py`，权限修复、登录改密、重启持久化、加密备份、只读根文件系统和隔离预览全部通过；预览还验证了主签到成功保留 AI 豆部分成功子结果、仅秒杀可移除及日志保留。ARM64 已完成构建与远端清单核对。本次沿用源码直接推送 `main` 的流程，未另外创建 GitHub Release。`python tools/package_feiniu.py` 已生成 `dist/cmcc-feiniu-1.6.10.zip` 与 `dist/cmcc-feiniu-latest.zip`，包完整性和图片引用校验通过。
+
+本次多架构发布命令：
+
+```powershell
+docker buildx build --platform linux/amd64,linux/arm64 --provenance=false --sbom=false `
+  -t rain5201/cmcc-daily:1.6.10 -t rain5201/cmcc-daily:latest --push .
+```
+
+## 1.6.9 本地审核记录（2026-10-15，合入 1.6.10 发布）
+
+修复所有一键执行模式误提交秒杀；AI 豆跳过整个外部合作区（包括待领奖），保留正常跳过原因，补全领奖、补领和任务接口失败的日志与计数。四处版本声明已同步为 `1.6.9`。
+
+本地使用 `docker compose -f compose.preview.yaml up -d --build` 构建 `cmcc-daily:preview` 并完成隔离预览。随后按用户授权，将同一已测试镜像以 `cmcc-daily:local-1.6.9` 更新到本机正式实例，继续使用原数据卷和 18080 端口，当时在 `.env.local` 固定该本地标签。1.6.9 没有单独发布远端标签，相关改动已包含在 1.6.10 中；本地实例随后也升级为 1.6.10。验证详情见 [验证记录](VALIDATION.md)。
+
 ## 1.6.8（2026-10-15）
 
 已发布 Docker Hub 镜像 `rain5201/cmcc-daily:1.6.8` 与 `latest`：秒杀活动清单改由服务端维护并固定让全部账号参与，日志弹窗新增「复制日志」；AI 豆等链路中需要真实操作、库存不足、已达上限、未到活动窗口等良性结果改为成功/跳过，真正的接口与网络错误仍告警，已完成结果不再被 pending 范围重跑。支持 `linux/amd64`、`linux/arm64`。

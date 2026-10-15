@@ -284,33 +284,42 @@ def run_mark_tasks(s: requests.Session, referer: str, cfg, dry_run: bool) -> str
         raise RuntimeError("AI 豆任务清单查询失败")
     tasks = (tl.get("data") or {}).get("tasks") or []
     # 外部合作区任务由合作方服务端回调记账，客户端无法代做，整区跳过
-    ext = [t for t in tasks if t.get("status") == 0
+    ext = [t for t in tasks if t.get("status") in (0, 1)
            and t.get("taskClasifiName") == "外部合作区"]
     todo = [t for t in tasks if t.get("status") == 0
             and t.get("taskClasifiName") != "外部合作区"]
-    pending_awards = [t for t in tasks if t.get("status") == 1]
+    pending_awards = [t for t in tasks if t.get("status") == 1
+                      and t.get("taskClasifiName") != "外部合作区"]
     if dry_run or not (todo or pending_awards):
+        if ext and not dry_run:
+            task_result.mark("success", "skipped")
         return (f"AI豆任务 {len(tasks)} 个，待办 {len(todo)} 个"
                 f"（另有外部合作区 {len(ext)} 个不做）")
 
     open_cache: dict = {}
-    got = skipped = 0
+    got = skipped = unavailable = failed = 0
+
+    def claim(t, step):
+        nonlocal got, unavailable, failed
+        tid = str(t.get("taskId") or "")
+        aw = api_call(s, referer, "POST", "/qwhdhub/api/mark/task/getTaskAward", {"taskId": tid})
+        if aw.get("code") == "SUCCESS":
+            got += 1
+            log.info("[AI豆] %s %s +%s", step, t.get("taskName", tid),
+                     (aw.get("data") or {}).get("awardNum"))
+        elif task_result.benign(aw.get("msg")):
+            unavailable += 1
+            task_result.mark("success", "unavailable")
+            log.info("[AI豆] %s %s 暂不可领（%s），按正常跳过", step, t.get("taskName", tid), aw.get("msg"))
+        else:
+            failed += 1
+            task_result.mark("partial", "business")
+            log.warning("[AI豆] %s %s 失败: code=%s msg=%s", step, t.get("taskName", tid),
+                        aw.get("code"), aw.get("msg"))
 
     # 上次运行握手中断/未领取的遗留（status=1 已完成待领奖）先补领
     for t in pending_awards:
-        tid = str(t.get("taskId") or "")
-        aw = api_call(s, referer, "POST", "/qwhdhub/api/mark/task/getTaskAward",
-                      {"taskId": tid})
-        if aw.get("code") == "SUCCESS":
-            n = (aw.get("data") or {}).get("awardNum")
-            log.info("[AI豆] 补领 %s +%s", t.get("taskName", tid), n)
-            got += 1
-        elif task_result.benign(aw.get("msg")):
-            # 已领过／没库存这类结果再试也不会变，按正常处理。
-            log.info("[AI豆] 补领 %s 暂不可领（%s），按正常跳过", t.get("taskName", tid), aw.get("msg"))
-            task_result.mark("success", "unavailable")
-        else:
-            task_result.mark("partial", "business")
+        claim(t, "补领")
         time.sleep(random.uniform(0.2, 0.5))
 
     def finish(tid, ttype, hdr_referer=None):
@@ -324,6 +333,17 @@ def run_mark_tasks(s: requests.Session, referer: str, cfg, dry_run: bool) -> str
             continue
         ju = str(t.get("jumpUrl") or "")
         info = api_call(s, referer, "POST", "/qwhdhub/api/mark/task/taskInfo", {"taskId": tid})
+        if info.get("code") != "SUCCESS":
+            if task_result.benign(info.get("msg")):
+                skipped += 1
+                log.info("[AI豆] %s 正常跳过: %s", t.get("taskName", tid), info.get("msg"))
+            else:
+                failed += 1
+                task_result.mark("partial", "business")
+                log.warning("[AI豆] %s 详情查询失败: code=%s msg=%s", t.get("taskName", tid),
+                            info.get("code"), info.get("msg"))
+            time.sleep(random.uniform(0.2, 0.5))
+            continue
         d = info.get("data") or {}
         task_type = str(d.get("taskType") or "")
         scan = int(d.get("scanTime") or 0)
@@ -336,9 +356,10 @@ def run_mark_tasks(s: requests.Session, referer: str, cfg, dry_run: bool) -> str
         if not done:
             r = finish(tid, task_type)
             msg = r.get("msg") or ""
-            if r.get("code") != "SUCCESS" and "公众号" in msg:
-                # 需真实关注公众号，无法代做，立即放弃不重试
+            if r.get("code") != "SUCCESS" and task_result.benign(msg):
+                # 需真实操作、次数已达上限等已知限制，无需访问目标页重试。
                 skipped += 1
+                log.info("[AI豆] %s 正常跳过: %s", t.get("taskName", tid), msg)
                 time.sleep(random.uniform(0.2, 0.5))
                 continue
             # 访问目标页后带目标页 Referer 重试（停留 scanTime，封顶 15s）
@@ -359,27 +380,23 @@ def run_mark_tasks(s: requests.Session, referer: str, cfg, dry_run: bool) -> str
                     r = {"code": "SUCCESS"}
 
         if done or r.get("code") == "SUCCESS":
-            aw = api_call(s, referer, "POST", "/qwhdhub/api/mark/task/getTaskAward",
-                          {"taskId": tid})
-            if aw.get("code") != "SUCCESS":
-                if task_result.benign(aw.get("msg")):
-                    log.info("[AI豆] %s 领奖暂不可用（%s），按正常跳过",
-                             t.get("taskName", tid), aw.get("msg"))
-                    task_result.mark("success", "unavailable")
-                else:
-                    task_result.mark("partial", "business")
-            n = (aw.get("data") or {}).get("awardNum") if aw.get("code") == "SUCCESS" else "?"
-            log.info("[AI豆] %s +%s", t.get("taskName", tid), n)
-            got += 1
-        else:
+            claim(t, "领奖")
+        elif task_result.benign(r.get("msg")):
             skipped += 1
+            log.info("[AI豆] %s 正常跳过: %s", t.get("taskName", tid), r.get("msg"))
+        else:
+            failed += 1
+            task_result.mark("partial", "business")
+            log.warning("[AI豆] %s 完成任务失败: code=%s msg=%s", t.get("taskName", tid),
+                        r.get("code"), r.get("msg"))
         time.sleep(random.uniform(0.2, 0.6))
-    if skipped:
+    if skipped or ext:
         # 第三方 App／需要真实操作的任务本来就做不了，属于正常跳过，不算失败。
         task_result.mark("success", "skipped")
     cost = time.monotonic() - begun
     return (f"AI豆任务 {len(todo)} 个待办，完成 {got} 个，跳过 {skipped} 个"
-            f"（第三方 App/真实操作类），外部合作区 {len(ext)} 个未计入，耗时 {cost:.0f}s")
+            f"（已知限制/真实操作类），领奖暂不可用 {unavailable} 个，失败 {failed} 个"
+            f"，外部合作区 {len(ext)} 个未计入，耗时 {cost:.0f}s")
 
 
 def run_games(cfg, dry_run: bool) -> list[str]:

@@ -75,6 +75,31 @@ def preview_case(docker, image, platform, http_timeout, suffix):
         assert rows[run_id]["status"] == "success", rows[run_id]
         assert "审核预览模拟" in (rows[run_id]["message"] or ""), rows[run_id]
 
+        # 主签到成功、附加任务部分成功仍保持绿色；仅秒杀可从卡片移除。
+        seeded_sign = next(item for item in normal["summary"]["tasks"] if item["task"] == "sign")
+        assert seeded_sign["state"] == "success", seeded_sign
+        assert any(part["key"] == "tasks" and part["state"] == "partial" for part in seeded_sign["parts"])
+        try:
+            load(f"/api/accounts/{normal['id']}/tasks/sign/dismiss", "POST", {"run_id": run_id}, csrf)
+            raise AssertionError("sign card accepted removal")
+        except HTTPError as error:
+            assert error.code == 400
+        seckill_id = load(f"/api/accounts/{normal['id']}/run", "POST", {"task": "seckill"}, csrf)["run_id"]
+        for _ in range(90):
+            current = next(item for item in load("/api/accounts")["accounts"] if item["id"] == normal["id"])
+            seckill = next(item for item in current["summary"]["tasks"] if item["task"] == "seckill")
+            if seckill["state"] == "success":
+                break
+            time.sleep(1)
+        else:
+            raise AssertionError("preview seckill did not finish")
+        assert seckill["dismiss_run_id"] == seckill_id and not seckill["hidden"], seckill
+        load(f"/api/accounts/{normal['id']}/tasks/seckill/dismiss", "POST", {"run_id": seckill_id}, csrf)
+        current = next(item for item in load("/api/accounts")["accounts"] if item["id"] == normal["id"])
+        assert next(item for item in current["summary"]["tasks"] if item["task"] == "seckill")["hidden"]
+        kept = load(f"/api/runs/{seckill_id}/log")
+        assert kept["run"]["status"] == "success" and "seckill" in kept["log"], kept
+
         # 数据目录里已有真实账号时预览必须拒绝启动，避免把正式实例切成模拟。
         docker("volume", "create", refused)
         docker("run", *platform, "--rm", "-v", f"{refused}:/data", "--entrypoint", "python", image, "-c", """

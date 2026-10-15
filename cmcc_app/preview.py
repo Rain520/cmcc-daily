@@ -135,17 +135,17 @@ def seed_status_demo(store, root):
             reason, auth = "ok", "valid"
             if health == "invalid":
                 status, reason, auth = "failed", "auth", "invalid"
-            elif health == "warning" and task == "sign":
+            elif health == "warning" and task == "rate":
                 status, reason = "partial", "partial"
-            parts = {"main": {"state": "failed" if status == "failed" else "success", "reason": reason}}
+            parts = {"main": {"state": status, "reason": reason}}
             if task == "sign":
                 parts.update({key: {"state": "unexecuted" if status == "failed" else "success", "reason": "unknown" if status == "failed" else "ok"}
                               for key in ("claim", "tasks", "games")})
                 if health == "warning":
                     parts["games"] = {"state": "failed", "reason": "network"}
                 elif health == "normal":
-                    # 演示「再做一次也不会变」的正常结果：绿色标签，不影响整次状态。
-                    parts["tasks"] = {"state": "success", "reason": "skipped"}
+                    # 主签到成功，AI 豆部分成功：整体绿色，附加步骤保留黄色。
+                    parts["tasks"] = {"state": "partial", "reason": "business"}
                     parts["games"] = {"state": "success", "reason": "unavailable"}
             result = {"version": 1, "state": status, "reason": reason, "auth": auth, "parts": parts}
             run_id = store.enqueue(account["id"], task)
@@ -230,12 +230,12 @@ def simulate(manager, run, parallel=False):
     else:
         parts = {"main": {"state": "success", "reason": "ok"}}
         if task == "sign":
-            # 模拟真实情况：累计奖励无可领取、拓展活动正常，AI 豆里有几个任务只能在手机 App 完成。
+            # 演示主签到成功、AI 豆部分成功：整体绿色，附加步骤保留黄色。
             parts.update({"claim": {"state": "success", "reason": "empty"},
-                          "tasks": {"state": "success", "reason": "skipped"},
+                          "tasks": {"state": "partial", "reason": "business"},
                           "games": {"state": "success", "reason": "ok"}})
             with log_path.open("a", encoding="utf-8") as handle:
-                handle.write("[AI豆任务] 3 个待办，完成 1 个，跳过 2 个（需要真实操作，属正常）\n")
+                handle.write("[AI豆任务] 虚构结果：3 个待办，完成 1 个，跳过 1 个，失败 1 个；主签到已成功\n")
         result = {"version": 1, "state": "success", "reason": "ok", "auth": "valid", "parts": parts}
     with log_path.open("a", encoding="utf-8") as handle:
         handle.write("模拟结果：执行完成（未访问移动接口）\n")

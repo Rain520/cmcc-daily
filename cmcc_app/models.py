@@ -23,6 +23,7 @@ def utcnow():
 
 
 TASK_ORDER = ("sign", "wed", "rate", "fee", "seckill")
+BATCH_TASKS = ("sign", "wed", "rate", "fee")
 RUN_STATUSES = ("queued", "running", "success", "partial", "failed", "interrupted")
 RUN_SOURCES = ("manual", "schedule", "import")
 DATE_PATTERN = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
@@ -211,11 +212,9 @@ def normalize_account(body, old=None, timezone_name="Asia/Shanghai"):
 
 
 def runnable_tasks(account):
-    """一键执行时提交哪些任务：签到、拼图、评价有礼、假期秒杀；话费查询需要话费会话。"""
-    tasks = ["sign", "wed", "rate", "seckill"]
-    if account["config"].get("fee_session_cookie"):
-        tasks.append("fee")
-    return tasks
+    """一键执行只包含日常任务；秒杀通过独立活动配置和运行。"""
+    return [task for task in BATCH_TASKS
+            if task != "fee" or account["config"].get("fee_session_cookie")]
 
 
 SECKILL_DEFAULTS = {"lead": 5, "interval": 0.35, "max_attempts": 120, "time": "11:59:55"}
@@ -365,6 +364,10 @@ class Store:
                 CREATE UNIQUE INDEX IF NOT EXISTS one_pending_per_account_task
                     ON runs(account_id, task) WHERE status IN ('queued', 'running');
                 CREATE INDEX IF NOT EXISTS runs_created ON runs(created_at DESC);
+                CREATE TABLE IF NOT EXISTS dismissed_task_cards (
+                    account_id TEXT NOT NULL, task TEXT NOT NULL, run_id TEXT NOT NULL,
+                    PRIMARY KEY (account_id, task)
+                );
                 CREATE TABLE IF NOT EXISTS activities (
                     id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, kind TEXT NOT NULL,
                     config TEXT NOT NULL, accounts TEXT NOT NULL,
@@ -390,6 +393,27 @@ class Store:
             if "activity_id" not in run_columns:
                 conn.execute("ALTER TABLE runs ADD COLUMN activity_id TEXT")
             conn.execute("CREATE INDEX IF NOT EXISTS runs_account_task ON runs(account_id,task,dry_run,created_at DESC)")
+            # 有明确主签到成功证据的旧记录按新规则更新；保留子结果、日志和退出码。
+            for row in conn.execute("SELECT * FROM runs WHERE task='sign' AND dry_run=0 "
+                                    "AND status IN ('success','partial','failed') AND result IS NOT NULL").fetchall():
+                updated = self.normalize_run_result(dict(row))
+                if any(updated[key] != row[key] for key in ("status", "message", "result")):
+                    conn.execute("UPDATE runs SET status=?,message=?,result=? WHERE id=?",
+                                 (updated["status"], updated["message"], updated["result"], row["id"]))
+
+    @staticmethod
+    def normalize_run_result(row):
+        from .results import clean, for_task, REASONS
+        original = clean(row.get("result"))
+        if row["status"] not in ("success", "partial", "failed"):
+            return row
+        result = for_task(row["task"], original, row["dry_run"])
+        if result and (result != original or (row["task"] == "sign" and not row["dry_run"]
+                                             and result["state"] == "success" and row["status"] != "success"
+                                             and result["parts"].get("main", {}).get("state") == "success")):
+            return {**row, "status": result["state"], "message": REASONS[result["reason"]],
+                    "result": json.dumps(result)}
+        return row
 
     @contextmanager
     def connect(self):
@@ -471,6 +495,26 @@ class Store:
                             (account_id,)).fetchone():
                 raise ValueError("账号有待执行或运行中的任务，请结束后再删除")
             conn.execute("DELETE FROM accounts WHERE id=?", (account_id,))
+            conn.execute("DELETE FROM dismissed_task_cards WHERE account_id=?", (account_id,))
+
+    def dismiss_task_card(self, account_id, task, run_id):
+        """只隐藏已结束秒杀的卡片信息；并发提交/新结果出现时拒绝旧页面移除。"""
+        if task != "seckill":
+            raise ValueError("只有秒杀任务可以从账号卡片移除")
+        with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            if not conn.execute("SELECT 1 FROM accounts WHERE id=?", (account_id,)).fetchone():
+                raise ValueError("账号不存在")
+            if conn.execute("SELECT 1 FROM runs WHERE account_id=? AND task=? "
+                            "AND status IN ('queued','running')", (account_id, task)).fetchone():
+                raise ValueError("任务正在执行或排队，结束后才能从卡片移除")
+            latest = conn.execute("SELECT id FROM runs WHERE account_id=? AND task=? "
+                                  "ORDER BY created_at DESC,rowid DESC LIMIT 1", (account_id, task)).fetchone()
+            if not latest or latest["id"] != run_id:
+                raise ValueError("任务结果已更新，请刷新后再移除")
+            conn.execute("INSERT INTO dismissed_task_cards (account_id,task,run_id) VALUES (?,?,?) "
+                         "ON CONFLICT(account_id,task) DO UPDATE SET run_id=excluded.run_id",
+                         (account_id, task, run_id))
 
     @staticmethod
     def insert_run(conn, account, task, dry_run, source, now, activity_id=None):
@@ -482,6 +526,7 @@ class Store:
                 (run_id, account["id"], account["name"], task, dry_run, source, now, activity_id))
         except sqlite3.IntegrityError:
             raise ValueError(f"{TASKS[task]}已在排队或执行中，请等它结束后再提交") from None
+        conn.execute("DELETE FROM dismissed_task_cards WHERE account_id=? AND task=?", (account["id"], task))
         return run_id
 
     def enqueue(self, account_id, task, dry_run=False, activity_id=None):
@@ -554,6 +599,12 @@ class Store:
         with self.connect() as conn:
             from .results import clean
             result = clean(result)
+            row = conn.execute("SELECT task,dry_run FROM runs WHERE id=?", (run_id,)).fetchone()
+            if row:
+                normalized = self.normalize_run_result({**dict(row), "status": status, "message": message,
+                                                        "result": json.dumps(result) if result else None})
+                status, message = normalized["status"], normalized["message"]
+                result = clean(normalized["result"])
             conn.execute("UPDATE runs SET status=?,exit_code=?,message=?,finished_at=?,result=? WHERE id=?",
                          (status, exit_code, message, utcnow().isoformat(),
                           json.dumps(result) if result else None, run_id))
@@ -864,6 +915,7 @@ class Store:
                 (self.data_dir / "logs" / f"{row['id']}.log").unlink(missing_ok=True)
             conn.execute("DELETE FROM runs")
             conn.execute("DELETE FROM accounts")
+            conn.execute("DELETE FROM dismissed_task_cards")
 
     def add_history(self, rows):
         """导入历史记录；已存在的记录保留原样，返回新增条数。"""
@@ -873,6 +925,7 @@ class Store:
         with self.connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             for row in rows:
+                row = self.normalize_run_result(row)
                 cursor = conn.execute("""INSERT OR IGNORE INTO runs
                     (id,account_id,account_name,task,dry_run,source,status,created_at,
                      started_at,finished_at,exit_code,message,result)

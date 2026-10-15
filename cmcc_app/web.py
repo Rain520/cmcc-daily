@@ -21,7 +21,7 @@ from .account_status import summaries
 from .backup import (MAX_FILE_BYTES, apply_payload, build_payload, check_passphrase,
                       decrypt_payload, encrypt_payload)
 from .logging_utils import redact
-from .models import (DATE_PATTERN, RUN_SOURCES, RUN_STATUSES, TASKS, TASK_ORDER, Store,
+from .models import (BATCH_TASKS, DATE_PATTERN, RUN_SOURCES, RUN_STATUSES, TASKS, Store,
                      normalize_account, public_account, public_activity, runnable_tasks,
                      activity_settings)
 from .runner import Manager
@@ -223,6 +223,17 @@ def create_app(settings, start_manager=False):
         (settings.data_dir / "cache" / f"jwt-{account_key(account['config']['phone'])}.json").unlink(missing_ok=True)
         return jsonify(ok=True)
 
+    @app.post("/api/accounts/<account_id>/tasks/<task>/dismiss")
+    @authenticated
+    def dismiss_task_card(account_id, task):
+        run_id = body().get("run_id")
+        if task != "seckill":
+            raise ValueError("只有秒杀任务可以从账号卡片移除")
+        if not isinstance(run_id, str) or not run_id:
+            raise ValueError("请选择已结束的秒杀结果")
+        store.dismiss_task_card(account_id, task, run_id)
+        return jsonify(ok=True)
+
     @app.get("/api/activities")
     @authenticated
     def activities():
@@ -347,7 +358,7 @@ def create_app(settings, start_manager=False):
         queued, skipped = [], []
         for account in accounts:
             if mode == "enabled":
-                tasks = [task for task in TASK_ORDER if account["schedules"][task]["enabled"]]
+                tasks = [task for task in BATCH_TASKS if account["schedules"][task]["enabled"]]
             else:
                 tasks = select_tasks(account, mode, status)
             part_queued, part_skipped = submit_runs(account, tasks)

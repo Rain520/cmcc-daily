@@ -322,6 +322,23 @@ class HistoryViewTests(unittest.TestCase):
         self.assertIn("schedules[entry.task] || defaultSchedule", self.script)
         self.assertIn("for (const task of taskKeys)", self.script)
 
+    def test_client_batch_plan_only_contains_daily_tasks(self):
+        from cmcc_app.models import BATCH_TASKS
+        match = re.search(r"const taskOrder = \[([^\]]+)\]", self.script)
+        keys = [item.strip().strip('"') for item in match.group(1).split(",") if item.strip()]
+        self.assertEqual(keys, list(BATCH_TASKS))
+        plan = self.script.split("function planFor(account, mode) {", 1)[1].split("function planCounts", 1)[0]
+        self.assertIn("for (const task of taskOrder)", plan)
+        self.assertNotIn("taskKeys", plan)
+        self.assertIn("秒杀不参与一键执行", self.script)
+
+    def test_only_finished_seckill_cards_offer_display_removal(self):
+        self.assertIn('if (entry.task === "seckill" && entry.dismiss_run_id)', self.script)
+        self.assertIn("if (entry.hidden) continue", self.script)
+        self.assertIn("/tasks/${entry.task}/dismiss", self.script)
+        self.assertIn("仅从账号卡片隐藏，保留计划、执行记录和日志", self.script)
+        self.assertIn(".task-result-actions{", self.style)
+
     def test_log_dialog_copies_the_log(self):
         """所有日志都能一键复制；局域网 http 访问时退回 execCommand。"""
         self.assertIn('id="copy-log"', self.html)

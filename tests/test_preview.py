@@ -143,7 +143,7 @@ class PreviewTests(unittest.TestCase):
         self.assertEqual(json.loads(run["result"])["parts"],
                          {"main": {"state": "success", "reason": "ok"},
                           "claim": {"state": "success", "reason": "empty"},
-                          "tasks": {"state": "success", "reason": "skipped"},
+                          "tasks": {"state": "partial", "reason": "business"},
                           "games": {"state": "success", "reason": "ok"}})
         log = (self.data / "logs" / f"{run_id}.log").read_text(encoding="utf-8")
         self.assertIn("未联网、未调用中国移动接口", log)

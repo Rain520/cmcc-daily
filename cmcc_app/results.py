@@ -35,7 +35,7 @@ def start(task, options, dry_run=False):
         parts.update({key: {"state": "unexecuted", "reason": "unknown"}
                       for key in PARTS[1:] if options.get(key)})
     _current.set({"version": 1, "state": "failed", "reason": "unknown", "auth": "unknown",
-                  "parts": parts, "active": "main", "dry_run": dry_run})
+                  "parts": parts, "active": "main", "dry_run": dry_run, "task": task})
 
 
 def begin(part):
@@ -47,15 +47,21 @@ def mark(state="success", reason="ok"):
     if value := _current.get():
         part = value["active"]
         previous = value["parts"].get(part, {})
-        # A later successful step must not hide an earlier failure in the same group.
-        if previous.get("state") in ("failed", "partial", "skipped") and state == "success":
+        # 后续成功或跳过不能掩盖已有失败，通用完成标记也不能抹掉正常跳过的原因。
+        severity = {"failed": 3, "partial": 2, "skipped": 1}
+        if severity.get(previous.get("state"), 0) > severity.get(state, 0):
+            return
+        if (previous.get("state") == state == "success" and reason == "ok"
+                and previous.get("reason") not in (None, "ok", "unknown")):
             return
         value["parts"][part] = {"state": state, "reason": reason}
 
 
 def auth(valid, fee=False):
     if value := _current.get():
-        value["auth"] = "valid" if valid else "invalid"
+        # 附加活动有独立会话，它们的登录结果不覆盖主签到的凭证判断。
+        if value.get("task") != "sign" or value["active"] == "main":
+            value["auth"] = "valid" if valid else "invalid"
         if not valid:
             mark("failed", "fee_auth" if fee else "auth")
 
@@ -90,7 +96,20 @@ def finish(exit_code):
     for part in value["parts"].values():
         if value["dry_run"] and part["state"] == "success":
             part.update(state="query", reason="query")
-    return clean({**value, "state": state, "reason": reason})
+    return for_task(value.get("task"), {**value, "state": state, "reason": reason}, value["dry_run"])
+
+
+def for_task(task, value, dry_run=False):
+    """签到整体只看主步骤；附加结果原样保留，查询/停止/超时不冒充签到完成。"""
+    value = clean(value)
+    if not value or task != "sign" or dry_run:
+        return value
+    main = value["parts"].get("main", {})
+    if (main.get("state") == "success" and value["state"] in ("success", "partial", "failed")
+            and value["reason"] not in ("timeout", "stopped", "query")):
+        value.update(state="success", reason="already" if main.get("reason") == "already" else "ok",
+                     auth="valid")
+    return value
 
 
 def clean(value):

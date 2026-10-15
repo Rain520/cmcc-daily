@@ -7,8 +7,8 @@ const state = { csrf: "", timezone: "Asia/Shanghai", accounts: [], runs: [], edi
 const weekdayFullLabels = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"];
 const labels = { queued: "等待执行", running: "正在执行", success: "执行完成", partial: "部分成功", failed: "执行失败", interrupted: "已停止" };
 const tasks = { sign: "每日签到", wed: "周三拼图", rate: "评价有礼", fee: "话费查询", seckill: "假期秒杀" };
-const taskOrder = ["sign", "wed", "rate", "fee"];          // 账号编辑里的四个计划（秒杀按活动管理）
-const taskKeys = ["sign", "wed", "rate", "fee", "seckill"];  // 与后端 TASK_ORDER 一致：执行记录与一键执行涵盖的任务
+const taskOrder = ["sign", "wed", "rate", "fee"];          // 账号计划与一键执行范围（秒杀按活动独立管理）
+const taskKeys = ["sign", "wed", "rate", "fee", "seckill"];  // 完整任务类型，用于记录与单项执行
 const weekdayLabels = ["一", "二", "三", "四", "五", "六", "日"];
 const runTaskLabels = { sign: "每日签到（使用账号中保存的选项）", wed: "周三充值日拼图",
   rate: "评价有礼（提交 10 分评价，不兑换）", fee: "话费余额查询", seckill: "假期秒杀（按场次自动等待并抢券）" };
@@ -226,6 +226,7 @@ function renderAccounts() {
     const schedules = accountSchedules(account);
     const taskList = node("div", undefined, "account-task-list");
     for (const entry of summary.tasks) {
+      if (entry.hidden) continue;
       const schedule = schedules[entry.task] || defaultSchedule;
       const row = node("div", undefined, "account-task-row");
       const line = node("div", undefined, "account-task-heading");
@@ -236,7 +237,16 @@ function renderAccounts() {
       badge.title = entry.run_id ? `${entry.detail} · 点击查看${entry.current || isPending({status:entry.state}) ? "本次" : "上次"}日志` : entry.detail;
       badge.setAttribute("aria-label", `${tasks[entry.task]}：${label}${entry.run_id ? "，查看日志" : ""}`);
       badge.dataset.focusKey = `${account.id}-${entry.task}`;
-      line.append(node("strong", tasks[entry.task]), badge);
+      const resultActions = node("div", undefined, "task-result-actions");
+      resultActions.append(badge);
+      if (entry.task === "seckill" && entry.dismiss_run_id) {
+        const remove = button("移除", "text-button task-dismiss", () => dismissTaskCard(account, entry));
+        remove.title = "仅从账号卡片隐藏，保留计划、执行记录和日志；下次执行时重新显示";
+        remove.setAttribute("aria-label", `从账号卡片移除${tasks[entry.task]}`);
+        remove.dataset.focusKey = `${account.id}-${entry.task}-dismiss`;
+        resultActions.append(remove);
+      }
+      line.append(node("strong", tasks[entry.task]), resultActions);
       row.append(line, node("p", schedule.enabled ? `${scheduleText(schedule)}${schedule.next_run ? " · 下次 " + dateText(schedule.next_run) : ""}` : "未开启计划 · 可手动执行", "task-timing"));
       if (["failed", "partial", "interrupted"].includes(entry.state)) {
         row.append(node("p", entry.detail, `task-detail ${entry.state}`));
@@ -280,6 +290,17 @@ function renderAccounts() {
     grid.append(card);
   }
   if (focused) Array.from(grid.querySelectorAll("[data-focus-key]")).find(el => el.dataset.focusKey === focused)?.focus({preventScroll: true});
+}
+
+async function dismissTaskCard(account, entry) {
+  try {
+    await api(`/accounts/${account.id}/tasks/${entry.task}/dismiss`, "POST", { run_id: entry.dismiss_run_id });
+    toast("已从卡片移除，历史与计划保留，下次执行时重新显示");
+    await refresh();
+  } catch (error) {
+    toast(error.message, true);
+    await refresh();
+  }
 }
 
 function renderRuns() {
@@ -691,8 +712,7 @@ function taskMark(account, task) {
 function planFor(account, mode) {
   const schedules = accountSchedules(account);
   const rows = [];
-  for (const task of taskKeys) {
-    // 秒杀没有账号级计划，勾选「只执行已开启计划」时与后端一样跳过它。
+  for (const task of taskOrder) {
     if (mode === "enabled" && !schedules[task].enabled) continue;
     const mark = taskMark(account, task);
     const repeat = Boolean(mark.done) && mode === "all";
@@ -730,7 +750,7 @@ function renderRunAllTasks(account) {
   container.replaceChildren();
   renderPlan(container, rows);
   const counts = planCounts(rows);
-  $("#run-all-hint").textContent = planHint(counts, counts.repeat ? "，重复执行会重新签到或再次消耗活动次数" : "");
+  $("#run-all-hint").textContent = planHint(counts, counts.repeat ? "，重复执行会重新签到或再次消耗活动次数" : "") + "秒杀不参与一键执行，请在「秒杀任务」页单独配置和运行。";
   $("#run-all-submit").disabled = counts.run === 0;
 }
 function openRunAll(account) {
@@ -763,7 +783,7 @@ function syncBatchDialog() {
   const counts = renderBatchPlan(mode);
   const tail = mode === "enabled" ? "，范围为各账号已开启计划的任务"
     : mode === "all" ? "，包含最近已执行成功的任务" : "，已执行成功的任务本次不再执行";
-  $("#batch-hint").textContent = planHint(counts, tail);
+  $("#batch-hint").textContent = planHint(counts, tail) + "秒杀不参与一键执行，请在「秒杀任务」页单独配置和运行。";
   $("#batch-submit").disabled = counts.run === 0;
 }
 function runnableTaskKeys(account) {
